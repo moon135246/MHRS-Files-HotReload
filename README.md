@@ -1,8 +1,25 @@
 # MHRS-Files-HotReload
 
-《怪物猎人：崛起》资源热加载实验项目。当前原型用 REFramework Lua 读取本地猎人手甲的材质，在同一 Mesh 上验证覆盖松散 MDF 文件后的运行时变化。
+《怪物猎人：崛起》资源热加载实验项目。现行原生模式可以在本地猎人穿戴手甲时，让引擎按原路径重新加载整份 `player/mod/f/pl279/f_arm279.mdf2`，并把新资源绑定到当前 Mesh。
 
-## 已验证的手甲颜色热刷新
+## 整份手甲 MDF 热加载
+
+验证环境为 Windows x64、Steam 16.0.2.0（Build 17920865）、REFramework v1.5.9.1+472-c4b13148。原生模块依赖此版游戏的内部布局与方法，并在运行时检查构建特征。
+
+1. 安装 REFramework，启用 LooseFileLoader。将项目中的 `reframework` 目录合并到游戏目录。此目录同时包含脚本和配套的 `data/MHRS-Files-HotReload/arm_material.dll`。已运行的游戏可在 ScriptRunner 中点 Reset scripts。
+2. 穿上使用目标 MDF 的手甲，在项目目录运行以下命令。监听器运行期间直接保存 `natives/stm/player/mod/f/pl279/f_arm279.mdf2.23`，按 Ctrl+C 结束监听。
+
+```powershell
+python tools/watch_arm279.py "F:\SteamLibrary\steamapps\common\MonsterHunterRise" --native
+```
+
+原生流程借鉴荒野版对旧资源生命周期、依赖就绪和当前 Mesh 绑定的处理。崛起的路径缓存使用有序树。模块在管理器的临界区内将旧对象暂存到另一个键，调用游戏自身的资源创建函数重新请求原路径。新 MDF、材质模板和贴图准备就绪后，脚本绑定新 holder，再释放事务引用。旧对象随现有使用者的引用正常释放。失败或依赖等待超时会尝试恢复原缓存条目。
+
+实测只更改 `Meira_5_outer_Arm / BaseDielectricMap` 的贴图引用。手动和保存触发各完成一次 `moon_5.tex → moon_6.tex → moon_5.tex`。每次使用同一 Mesh 和原逻辑路径，MDF 对象地址随重载更新；对六个材质槽的 56 个贴图绑定逐项比较，只有目标引用变化。自动监听实测两次保存到绑定回执约 0.96 秒、0.84 秒，测试结束原文件 SHA-256 与基线一致。此版实测范围为该手甲和已经加载的贴图依赖；新增未加载依赖、不同模板和槽布局仍需单独验证。
+
+编译可运行 `native/build.cmd`，需要 Visual Studio C++ x64 工具链。复测贴图前先退出监听器，再运行 `python tools/test_native_arm279.py "F:\SteamLibrary\steamapps\common\MonsterHunterRise"`。报告和备份保存在 `local-tests/native-<编号>/`。如果外部测试进程被强制终止，原件可从该目录恢复。
+
+## 早期颜色刷新模式
 
 将本仓库的整个 `reframework/autorun` 目录合并到游戏的同名目录，在 `reframework/data` 下创建 `MHRS-Files-HotReload` 目录，然后加载脚本。穿上使用 `f_arm279.mdf2.23` 的手甲，在修改 MDF 前从项目目录启动监听：
 
@@ -12,13 +29,13 @@ python tools/watch_arm279.py "F:\SteamLibrary\steamapps\common\MonsterHunterRise
 
 看到 `Captured 12 bindings` 后可直接保存目标 MDF。监听器合并短时间内的文件变动，游戏线程通过 `via.io.file.copy` 读取原松散路径到自己的快照，解析 MDF2.23，按材质名和参数名更新手甲。按 Ctrl+C 结束监听。手动测试可用 Script Generated UI → MHRS Files HotReload 中的 Capture 和 Read MDF 按钮。重新换装或重载脚本后，在再次修改文件前重新启动监听以采集当前手甲。
 
-在已穿戴的同一只手甲上，`moon_RimColor` 的测试值覆盖了六个槽，延迟 8.61 秒读回仍为 (1, 0, 1, 1)。另一次仅保存文件的测试中，监听器约 0.25 秒后收到更新回执，六个槽采用新值；恢复原文件后，六槽及原 MDF 哈希均恢复。两个实验都沿用原 Mesh。当前另一个探测参数 `S_col_R` 在后续采样时回到了原有运行时值，其覆盖来源待定位。贴图、槽位增删和材质模板整体替换尚未验证。
+在已穿戴的同一只手甲上，`moon_RimColor` 的测试值覆盖了六个槽，延迟 8.61 秒读回仍为 (1, 0, 1, 1)。另一次仅保存文件的测试中，监听器约 0.25 秒后收到更新回执，六个槽采用新值；恢复原文件后，六槽及原 MDF 哈希均恢复。两个实验都沿用原 Mesh。当前另一个探测参数 `S_col_R` 在后续采样时回到了原有运行时值，其覆盖来源待定位。该颜色模式仅处理上述参数。
 
 ### 资源复用与荒野实现的对照
 
 本机 REFramework 的 Lua 绑定把请求转交给游戏的 `via.ResourceManager`。在覆盖后，原路径请求返回的原生资源地址与已穿戴 Mesh 的材质 holder 所持地址相同；NTFS 通知在显式刷新读盘时触发。可观察到的复用边界是资源管理器的返回值。崛起反射暴露的管理器方法中未找到按路径清除或重载的入口。另一次只读实验中，在逻辑路径中加入 `./` 返回了不同对象，并在主动对照读取前触发同一物理文件的打开通知；该实验未绑定新对象。
 
-荒野版会暂时移开旧缓存条目、按原路径加载，等待 MDF 和依赖就绪后提交，再刷新正在使用它的 Mesh，并按新旧文件差异保留运行时覆盖。崛起颜色原型沿用了按材质和参数比对的思路。当前显式读盘与参数刷新保留了原资源对象，尚未完成崛起原生缓存条目的替换。[荒野加载与 Mesh 刷新实现](https://github.com/AleksKavil/MHWS-Files-HotReload/blob/e3ef3e067bfed2da5c1a1adac79c55fe1dbaaa08/src/hotreload.cpp) · [REFramework 资源管理器封装](https://github.com/praydog/REFramework/blob/c4b13148/shared/sdk/ResourceManager.cpp)
+荒野版会暂时移开旧缓存条目、按原路径加载，等待 MDF 和依赖就绪后提交，再刷新正在使用它的 Mesh，并按新旧文件差异保留运行时覆盖。崛起颜色原型沿用了按材质和参数比对的思路。此处的早期颜色实验保留了原资源对象；原生模式的实测见上节。[荒野加载与 Mesh 刷新实现](https://github.com/AleksKavil/MHWS-Files-HotReload/blob/e3ef3e067bfed2da5c1a1adac79c55fe1dbaaa08/src/hotreload.cpp) · [REFramework 资源管理器封装](https://github.com/praydog/REFramework/blob/c4b13148/shared/sdk/ResourceManager.cpp)
 
 ## 首次实机结果
 

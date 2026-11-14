@@ -48,6 +48,81 @@ local function normalized(path)
     return (path or ""):lower():gsub("\\", "/"):gsub("^@", "")
 end
 
+local native_lib = {}
+local native_job
+local function native(action)
+    if not native_lib[action] then
+        native_lib[action] = assert(package.loadlib("reframework/data/MHRS-Files-HotReload/arm_material.dll", "mhrs_" .. action))
+    end
+    native_lib[action]()
+    local f = assert(io.open(data .. "native-state.txt", "r"))
+    local state, address = f:read("*l"), f:read("*l")
+    f:close()
+    return state, address
+end
+
+local function textures(mesh)
+    local holder = mesh:call("get_Material")
+    local result = {path=holder:call("get_ResourcePath"), mesh=tostring(mesh:get_address()),
+        resource=tostring(holder:read_qword(0x10)), ready=mesh:call("get_MaterialReady"), slots={}}
+    if not result.ready then return result end
+    for i=0, mesh:call("get_MaterialNum")-1 do
+        local slot = {name=mesh:call("getMaterialName",i), enabled=mesh:call("getMaterialsEnable",i), textures={}}
+        for j=0, mesh:call("getMaterialTextureNum",i)-1 do
+            local name = mesh:call("getMaterialTextureName",i,j)
+            local tex = mesh:call("getMaterialTexture",i,j)
+            if name and tex then slot.textures[name]=tex:call("get_ResourcePath") end
+        end
+        result.slots[#result.slots+1]=slot
+    end
+    return result
+end
+
+local function native_action(action, mesh)
+    if action == "native_poll" then
+        local state,address=native("poll")
+        return {state=state,address=address}
+    end
+    if action == "native_begin" then
+        assert(not native_job, "Reload already pending")
+        local prior=textures(mesh)
+        assert(prior.ready and normalized(prior.path)==original and #prior.slots>0,"Arm not ready")
+        local state,address=native("begin")
+        assert(state=="pending",state)
+        native_job={mesh=prior.mesh, prior=prior.resource, fresh=address, slots=prior.slots}
+        return {state=state,address=address,prior=prior}
+    end
+    if action=="native_abort" then
+        local state=native("abort")
+        if state=="rolled back" or state=="no active transaction" then native_job=nil end
+        return {state=state}
+    end
+    assert(action=="native_bind" and native_job, "No pending reload")
+    local state,address=native("poll")
+    assert(state=="ready" and address==native_job.fresh,"MDF or its dependencies not ready")
+    local prior=mesh:call("get_Material")
+    assert(tostring(mesh:get_address())==native_job.mesh and tostring(prior:read_qword(0x10))==native_job.prior,
+        "Equipped mesh or binding changed")
+    local resource=assert(sdk.create_resource("via.render.MeshMaterialResource",original))
+    assert(tostring(resource:get_address())==address,"Resource manager returned another object")
+    local holder=assert(resource:create_holder("via.render.MeshMaterialResourceHolder"))
+    resource:release() -- balance create_resource; holder and transaction retain their own references
+    mesh:call("set_Material(via.render.MeshMaterialResourceHolder)",holder)
+    assert(tostring(mesh:call("get_Material"):read_qword(0x10))==address,"Mesh did not bind new MDF")
+    local committed=native("commit")
+    assert(committed=="committed",committed)
+    local switches={}
+    for _,s in ipairs(native_job.slots) do switches[s.name]=s.enabled end
+    native_job=nil
+    if mesh:call("get_MaterialReady") then
+        for i=0,mesh:call("get_MaterialNum")-1 do
+            local enabled=switches[mesh:call("getMaterialName",i)]
+            if enabled~=nil and mesh:call("getMaterialsEnable",i)~=enabled then mesh:call("setMaterialsEnable",i,enabled) end
+        end
+    end
+    return {state=committed,resource=address}
+end
+
 local function diagnose(mesh)
     local methods = {}
     for _, name in ipairs({"via.ResourceManager", "via.ResourceHolder", "via.render.MeshMaterialResourceHolder",
@@ -81,7 +156,10 @@ local function diagnose(mesh)
 end
 
 local function run(action)
+    if action=="native_abort" then return native_action(action) end
     local mesh = arm()
+    if action=="textures" then return textures(mesh) end
+    if action:sub(1,7)=="native_" then return native_action(action,mesh) end
     if action == "inspect" then return inspect(mesh) end
     if action == "diagnose" then return diagnose(mesh) end
     local before = inspect(mesh)
@@ -97,6 +175,9 @@ local function run(action)
 end
 
 local queued, feedback
+re.on_script_reset(function()
+    if native_job then native_action("native_abort") end
+end)
 re.on_draw_ui(function()
     if not imgui.tree_node("MHRS Files HotReload") then return end
     if imgui.button("Capture f_arm279 before editing") then queued = "capture" end
