@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import struct
+import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -64,7 +66,7 @@ def replace(path, data):
         tmp.unlink(missing_ok=True)
 
 
-def main(game):
+def main(game, observe_opens=False):
     run = Path(__file__).resolve().parents[1] / "local-tests" / uuid.uuid4().hex
     run.mkdir(parents=True)
     channel = game / "reframework/data/MHRS-Files-HotReload"
@@ -80,6 +82,8 @@ def main(game):
 
     def command(label, action):
         key = uuid.uuid4().hex
+        times = report.setdefault("command_times_ns", {}).setdefault(label, {})
+        times["send"] = time.time_ns()
         replace(channel / "request.json", json.dumps({"id": key, "action": action}).encode())
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
@@ -89,6 +93,7 @@ def main(game):
             except (FileNotFoundError, json.JSONDecodeError, PermissionError):
                 continue
             if reply.get("id") == key:
+                times["ack"] = time.time_ns()
                 report["samples"][label] = reply
                 save()
                 if not reply["ok"]:
@@ -123,29 +128,55 @@ def main(game):
         raise RuntimeError("Test marker already present on equipped arm")
     slot_names = [s["name"] for s in baseline["slots"]]
     old_values = [s["moon_RimColor"] for s in baseline["slots"]]
-    changed = rebound = False
+    changed = False
+    observer = None
     try:
         if target.read_bytes() != original:
             raise RuntimeError("Original file changed during setup")
         replace(target, edited)
         changed = True
+        if observe_opens:
+            observer = subprocess.Popen(
+                [sys.executable, str(Path(__file__).with_name("observe_file_open.py")), str(target)],
+                stdout=subprocess.PIPE, text=True)
+            trace = report["file_open_probe"] = {}
+            trace["armed"] = json.loads(observer.stdout.readline())
+            save()
         sample("overwrite_only")
-        rebound = True
-        command("bind_same", "same")
+        command("request_same", "request_same")
         sample("after_same")
+        if observe_opens:
+            time.sleep(5)
+            sample("after_same_delayed")
+            trace["control_start_ns"] = time.time_ns()
+            control = target.read_bytes()
+            trace["control_end_ns"] = time.time_ns()
+            trace["control_sha256"] = hashlib.sha256(control).hexdigest()
+            if control != edited:
+                raise RuntimeError("Positive control read unexpected content")
+            remaining, _ = observer.communicate(timeout=5)
+            if observer.returncode != 0:
+                raise RuntimeError("File observation failed")
+            trace["notification"] = json.loads(remaining)
+            trace["first_break_during_control"] = (
+                trace["control_start_ns"] <= trace["notification"]["time_ns"] <= trace["control_end_ns"])
+            save()
     finally:
+        if observer is not None and observer.poll() is None:
+            observer.kill()
+            observer.wait()
         if changed:
             if target.read_bytes() != edited:
                 raise RuntimeError("Concurrent edit; original backup in " + str(run))
             replace(target, original)
             report["restored_sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
             save()
-        if rebound:
-            command("restore", "restore")
             sample("restored")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("game", type=Path, help="MonsterHunterRise installation directory")
-    main(parser.parse_args().game)
+    parser.add_argument("--observe-opens", action="store_true", help="Monitor the replaced NTFS file until a control read")
+    args = parser.parse_args()
+    main(args.game, args.observe_opens)

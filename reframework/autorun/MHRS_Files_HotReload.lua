@@ -4,7 +4,6 @@ local original = base .. ".mdf2"
 local data = "MHRS-Files-HotReload/"
 local mesh_type = sdk.typeof("via.render.Mesh")
 local interval, last_id = 0, nil
-local saved, owner
 
 local function arm()
     local manager = sdk.get_managed_singleton("snow.player.PlayerManager")
@@ -51,25 +50,12 @@ end
 local function run(action)
     local mesh = arm()
     if action == "inspect" then return inspect(mesh) end
-    assert(action == "same" or action == "restore", "Unknown action")
+    assert(action == "request_same", "Unknown action")
     local before = inspect(mesh)
     local bound = normalized(before.path)
     assert(bound == original, "Unexpected material: " .. tostring(before.path))
-    if owner ~= before.mesh then saved, owner = nil, before.mesh end
-    if not saved then
-        assert(bound == original, "Original holder unavailable")
-        saved = mesh:call("get_Material")
-    end
-    if action == "restore" then
-        mesh:call("set_Material", saved)
-        saved, owner = nil, nil
-        return {before = before}
-    end
     local path = original
     local res = assert(sdk.create_resource("via.render.MeshMaterialResource", path), "Resource unavailable")
-    local holder = assert(res:create_holder("via.render.MeshMaterialResourceHolder"), "Holder unavailable")
-    assert(normalized(holder:call("get_ResourcePath")) == path, "Resource path mismatch")
-    mesh:call("set_Material", holder)
     return {before = before, requested = path, resource = tostring(res:get_address())}
 end
 
