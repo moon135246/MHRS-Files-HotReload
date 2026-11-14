@@ -11,11 +11,11 @@ from helm_user import decode, diff
 from watch_arm279 import command, reload_native, signature
 from test_arm279 import LOGICAL
 
-SUFFIXES = (".chain.48", ".mesh.2109148288", ".tex.28", ".mdf2.23", ".user.2", ".mmtr.220427553")
+SUFFIXES = (".chain.48", ".jcns.21", ".motbank.3", ".mesh.2109148288", ".tex.28", ".mdf2.23", ".user.2", ".mmtr.220427553")
 
 
-def reload_asset(channel, path):
-    job = command(channel, "asset_begin", path=path)
+def reload_asset(channel, path, **checks):
+    job = command(channel, "asset_begin", path=path, **checks)
     try:
         deadline = time.monotonic()+12
         while time.monotonic() < deadline:
@@ -51,6 +51,21 @@ def templates(file):
             raise ValueError("Invalid MDF template path")
         paths.add(raw[start:end].decode("utf-16-le").lower())
     return paths
+
+
+def joint_checks(file):
+    raw = file.read_bytes()
+    if len(raw) < 48 or raw[:8] != b"\x15\0\0\0jcns":
+        raise ValueError("Invalid JCNS v21 header")
+    if struct.unpack_from("<I", raw, 40)[0] != 1:
+        return {}
+    table = struct.unpack_from("<Q", raw, 32)[0]
+    if table > len(raw)-8:
+        raise ValueError("Invalid JCNS group table")
+    group = struct.unpack_from("<Q", raw, table)[0]
+    if group > len(raw)-78:
+        raise ValueError("Invalid JCNS group offset")
+    return {"expected_outputs": struct.unpack_from("<H", raw, group+76)[0]}
 
 
 def reload_template(channel, root, path, present):
@@ -128,7 +143,8 @@ def watch(game):
                     result, _ = reload_native(channel)
                     print("Bound MDF", result["resource"], flush=True)
                 else:
-                    result = reload_asset(channel, path)
+                    checks = joint_checks(file) if path.endswith(".jcns") else {}
+                    result = reload_asset(channel, path, **checks)
                     print("Bound", path, result["resource"], result["bindings"], flush=True)
                 applied[file] = current
             except (FileNotFoundError, PermissionError):

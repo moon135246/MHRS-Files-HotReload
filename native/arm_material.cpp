@@ -16,7 +16,9 @@ constexpr Kind kinds[] = {
     {L".mesh",0x5da4e5c8,"via.render.MeshResource"},
     {L".chain",0x5b53b1ab,"via.motion.ChainResource"},
     {L".tex",0x3590e544,"via.render.TextureResource"},
-    {L".mmtr",0x9c0da5c7,"via.render.MasterMaterialResource"}
+    {L".mmtr",0x9c0da5c7,"via.render.MasterMaterialResource"},
+    {L".jcns",0x8a7d4b14,"via.motion.JointConstraintsResource"},
+    {L".motbank",0xbc91e6b4,"via.motion.MotionBankResource"}
 };
 constexpr char result_path[] = "reframework/data/MHRS-Files-HotReload/native-state.txt";
 const Ptr base = reinterpret_cast<Ptr>(GetModuleHandleW(nullptr));
@@ -171,6 +173,23 @@ extern "C" __declspec(dllexport) int mhrs_begin(void*) {
     auto msg=begin(L"player/mod/f/pl279/f_arm279.mdf2",kinds[0]); write_state(msg,tx.fresh); return 0;
 }
 extern "C" __declspec(dllexport) int mhrs_asset(void*) { auto msg=begin_asset(); write_state(msg,tx.fresh); return 0; }
+// Rise JCNS v21 relocates the group table and its group pointers on load.
+// Check the pending resource before publishing it to any layer.
+extern "C" __declspec(dllexport) int mhrs_joint_outputs(void*) {
+    if (!tx.fresh || tx.kind!=&kinds[5] || field<uint16_t>(tx.fresh,0x38)!=0x101) {
+        write_state("JCNS resource not ready"); return 0;
+    }
+    const auto raw=field<Ptr>(tx.fresh,0x58);
+    if (!raw || field<uint32_t>(raw,0)!=21 || field<uint32_t>(raw,4)!=0x736e636a ||
+        field<uint32_t>(raw,40)!=1) {
+        write_state("unexpected JCNS group layout"); return 0;
+    }
+    const auto table=field<Ptr>(raw,32);
+    const auto group=table ? field<Ptr>(table,0) : 0;
+    if (group) write_state("outputs",field<uint16_t>(group,76));
+    else write_state("missing JCNS group");
+    return 0;
+}
 // Keep the template and its old cache entry alive while dependent MDFs rebind.
 extern "C" __declspec(dllexport) int mhrs_hold_master(void*) {
     if (!master.old && tx.old && tx.kind==&kinds[4] && field<uint16_t>(tx.fresh,0x38)==0x101) {

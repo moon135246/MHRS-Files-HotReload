@@ -3,6 +3,8 @@ local M = {}
 local kinds = {
     mesh={"via.render.Mesh","via.render.MeshResource","getMesh","setMesh"},
     chain={"via.motion.Chain","via.motion.ChainResource","get_ChainAsset","set_ChainAsset"},
+    jcns={"via.motion.JointConstraints","via.motion.JointConstraintsResource","get_JointConstraintsAsset","set_JointConstraintsAsset"},
+    motbank={"via.motion.Motion","via.motion.MotionBankResource","get_MotionBankAsset","set_MotionBankAsset"},
     tex={"via.render.Mesh","via.render.TextureResource"},
     mdf2={"via.render.Mesh","via.render.MeshMaterialResource","get_Material","set_Material"},
     user={"snow.player.PlayerMaterialParts"}
@@ -26,12 +28,23 @@ end
 
 local function holder(b)
     if b.i then return b.comp:call("getMaterialTexture",b.i,b.j) end
-    return b.comp:call(b.kind[3])
+    local owner=b.layer or b.comp
+    return owner:call(b.kind[3])
 end
 
 local function assign(b,h)
     if b.i then b.comp:call("setMaterialTexture",b.i,b.j,h)
+    elseif b.layer then
+        b.layer:call(b.kind[4],h)
     else b.comp:call(b.kind[4],h) end
+end
+
+local function scene_components(class)
+    local scene=sdk.call_native_func(sdk.get_native_singleton("via.SceneManager"),
+        sdk.find_type_definition("via.SceneManager"),"get_CurrentScene")
+    assert(scene,"Current scene unavailable")
+    local components=scene:call("findComponents(System.Type)",sdk.typeof(class))
+    return components and components:get_elements() or {}
 end
 
 local function bindings(path,kind,ext)
@@ -45,14 +58,23 @@ local function bindings(path,kind,ext)
             found[#found+1]=b
         end
     end
-    for _,comp in ipairs(parts(kind[1])) do
-        if ext=="tex" then
+    local scene_scope=ext=="chain" or ext=="jcns" or ext=="motbank"
+    local components=scene_scope and scene_components(kind[1]) or parts(kind[1])
+    for _,comp in ipairs(components) do
+        if scene_scope and not comp:call("get_GameObject"):call("get_Update") then
+            -- A dormant NPC has no running simulation to refresh.
+        elseif ext=="tex" then
             if comp:call("get_MaterialReady") then
                 for i=0,comp:call("get_MaterialNum")-1 do
                     for j=0,comp:call("getMaterialTextureNum",i)-1 do
                         consider({comp=comp,i=i,j=j,kind=kind})
                     end
                 end
+            end
+        elseif ext=="jcns" then
+            for i=0,comp:call("getLayerCount")-1 do
+                local layer=comp:call("getLayer",i)
+                if layer then consider({comp=comp,kind=kind,layer=layer,layer_index=i}) end
             end
         else consider({comp=comp,kind=kind}) end
     end
@@ -65,7 +87,19 @@ local function binding_report(list,ext)
         local r={object=b.comp:call("get_GameObject"):call("get_Name"),path=b.path,
             component=tostring(b.comp:get_address()),resource=tostring(holder(b):read_qword(0x10))}
         if ext=="chain" then r.groups=b.comp:call("getGroupCount");r.resource_groups=b.comp:call("get_ResourceGroupCount") end
+        if b.layer then
+            r.layer=b.layer_index
+            r.targets=b.layer:call("get_OutputTargetCount")
+        end
         if ext=="mesh" then r.ready=b.comp:call("get_MeshReady");r.lods=b.comp:call("get_LodCount") end
+        if ext=="motbank" then
+            local banks={}
+            for i=0,b.comp:call("getActiveMotionBankCount")-1 do
+                local bank=b.comp:call("getActiveMotionBank",i)
+                if bank then banks[#banks+1]=bank:call("get_BankID") end
+            end
+            r.banks=banks
+        end
         if b.i then r.material=b.i;r.slot=b.j end
         result[#result+1]=r
     end
@@ -199,6 +233,11 @@ function M.run(action,req,native)
     end
     if action=="asset_bind" then
         assert(job and native("poll")=="ready","Resource not ready")
+        if job.expected_outputs then
+            local state,outputs=native("joint_outputs")
+            assert(state=="outputs" and tonumber(outputs)==job.expected_outputs,
+                "JCNS output count differs from the loose file. Turn off LooseFileLoader > Debug > Enable file cache and save again.")
+        end
         local list=bindings(job.path,job.kind,job.ext)
         assert(#list>0,"Resource no longer equipped")
         for _,b in ipairs(list) do assert(b.old:read_qword(0x10)==job.old,"Equipped binding changed") end
@@ -237,12 +276,13 @@ function M.run(action,req,native)
     local list=bindings(path,kind,ext)
     if action=="asset_inspect" then return {bindings=binding_report(list,ext)} end
     assert(action=="asset_begin" and not job and (not master or (master.held and ext=="mdf2")),"Invalid asset request")
-    assert(#list>0,"No matching equipped resource")
+    assert(#list>0,"No matching active resource user")
     local f=assert(io.open("MHRS-Files-HotReload/asset-path.txt","wb"))
     f:write(list[1].path); f:close()
     local state,address=native("asset")
     assert(state=="pending",state)
-    job={kind=kind,ext=ext,path=list[1].path,old=list[1].old:read_qword(0x10),fresh=address}
+    job={kind=kind,ext=ext,path=list[1].path,old=list[1].old:read_qword(0x10),fresh=address,
+        expected_outputs=ext=="jcns" and req.expected_outputs}
     return {state=state,address=address,bindings=#list}
 end
 return M
