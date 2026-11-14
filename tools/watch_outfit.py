@@ -1,4 +1,4 @@
-"""Watch loose Rise outfit resources used by the local hunter."""
+"""Watch loose resources used by equipped parts and active Rise scene components."""
 import argparse
 import os
 import struct
@@ -8,10 +8,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from helm_user import decode, diff
+from gui_view import view_fields, view_diff
+from scene_data import PLAYER_MARKER, camera_fields, marker_diff, marker_time
 from watch_arm279 import command, reload_native, signature
 from test_arm279 import LOGICAL
 
-SUFFIXES = (".chain.48", ".jcns.21", ".motbank.3", ".mesh.2109148288", ".tex.28", ".mdf2.23", ".user.2", ".mmtr.220427553")
+SUFFIXES = (".chain.48", ".jcns.21", ".motbank.3", ".motlist.528", ".efx.2818730", ".rcol.20",
+            ".mesh.2109148288", ".tex.28", ".mdf2.23", ".user.2", ".mmtr.220427553", ".gui.430033", ".pfb.17")
 
 
 def reload_asset(channel, path, **checks):
@@ -21,8 +24,10 @@ def reload_asset(channel, path, **checks):
         while time.monotonic() < deadline:
             state = command(channel, "asset_poll")["state"]
             if state == "ready":
-                return command(channel, "asset_bind")
-            if state != "pending":
+                result = command(channel, "asset_bind")
+                if result["state"] != "pending":
+                    return result
+            elif state != "pending":
                 raise RuntimeError(state)
         raise TimeoutError("Asset did not finish loading: " + job["address"])
     except BaseException:
@@ -35,6 +40,19 @@ def files(root):
         for name in names:
             if name.lower().endswith(SUFFIXES):
                 yield Path(directory) / name
+
+
+def update_camera(channel, path, before, after, edits):
+    command(channel, "asset_camera_prepare", path=path)
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            sample = command(channel, "asset_camera_inspect", path=path, edits=after)["values"]
+            if all(sample[k] in (before[k], after[k]) for k in after):
+                return command(channel, "asset_camera", path=path, edits=edits)
+        raise TimeoutError("Camera USER did not reach the expected field values")
+    finally:
+        command(channel, "asset_camera_release", path=path)
 
 
 def templates(file):
@@ -102,11 +120,22 @@ def watch(game):
     if not root.is_dir() or not channel.is_dir():
         raise ValueError("Missing loose resources or plugin data directory")
     observed, applied, users = {}, {}, {}
+    gui_files = {}
+    markers, cameras = {}, {}
     for file in files(root):
         applied[file] = observed[file] = signature(file)
+        if file.name.lower().endswith(".gui.430033"):
+            gui_files[file] = file.read_bytes()
+        if file.relative_to(root).as_posix().lower() == PLAYER_MARKER + ".17":
+            markers[file] = file.read_bytes()
         if file.name.lower().endswith(".user.2"):
             try:
-                users[file] = decode(file.read_bytes())
+                raw = file.read_bytes()
+                camera = camera_fields(raw)
+                if camera is not None:
+                    cameras[file] = camera
+                else:
+                    users[file] = decode(raw)
             except (ValueError, struct.error):
                 pass
     print("Watching", len(applied), "outfit files in", root, flush=True)
@@ -117,6 +146,9 @@ def watch(game):
             observed.pop(removed)
             applied.pop(removed, None)
             users.pop(removed, None)
+            gui_files.pop(removed, None)
+            markers.pop(removed, None)
+            cameras.pop(removed, None)
         for file in sorted(present):
             try:
                 current = signature(file)
@@ -126,8 +158,45 @@ def watch(game):
                 if applied.get(file) == current:
                     continue
                 path = file.relative_to(root).as_posix().rsplit(".", 1)[0]
-                if path.endswith(".user"):
-                    updated = decode(file.read_bytes())
+                if path.lower().endswith(".pfb"):
+                    if path.lower() != PLAYER_MARKER:
+                        raise ValueError("Unsupported prefab path")
+                    content = file.read_bytes()
+                    if file not in markers:
+                        marker_time(content)
+                        print("Recorded PFB baseline", path, flush=True)
+                    else:
+                        edits = marker_diff(markers[file], content)
+                        if edits:
+                            result = command(channel, "asset_marker", path=path, edits=edits)
+                            print("Updated PFB", path, result["count"], "instances", flush=True)
+                    markers[file] = content
+                elif path.lower().endswith(".gui"):
+                    content = file.read_bytes()
+                    if file not in gui_files:
+                        view_fields(content)
+                        print("Recorded GUI baseline", path, flush=True)
+                    else:
+                        edits = view_diff(gui_files[file], content)
+                        if edits:
+                            result = command(channel, "asset_gui", path=path, edits=edits)
+                            print("Updated GUI", path, result["views"], "views", flush=True)
+                    gui_files[file] = content
+                elif path.lower().endswith(".user"):
+                    raw = file.read_bytes()
+                    camera = camera_fields(raw)
+                    if camera is not None:
+                        if file not in cameras:
+                            print("Recorded camera USER baseline", path, flush=True)
+                        else:
+                            edits = {k:v for k,v in camera.items() if cameras[file][k] != v}
+                            if edits:
+                                result = update_camera(channel, path, cameras[file], camera, edits)
+                                print("Updated camera USER", path, len(result["values"]), "fields", flush=True)
+                        cameras[file] = camera
+                        applied[file] = current
+                        continue
+                    updated = decode(raw)
                     if file not in users:
                         users[file] = updated
                         print("Recorded new helm USER baseline", path, flush=True)

@@ -18,7 +18,10 @@ constexpr Kind kinds[] = {
     {L".tex",0x3590e544,"via.render.TextureResource"},
     {L".mmtr",0x9c0da5c7,"via.render.MasterMaterialResource"},
     {L".jcns",0x8a7d4b14,"via.motion.JointConstraintsResource"},
-    {L".motbank",0xbc91e6b4,"via.motion.MotionBankResource"}
+    {L".motbank",0xbc91e6b4,"via.motion.MotionBankResource"},
+    {L".efx",0,"via.effect.EffectResource"},
+    {L".motlist",0,"via.motion.MotionListResource"},
+    {L".rcol",0,"via.physics.RequestSetColliderResource"}
 };
 constexpr char result_path[] = "reframework/data/MHRS-Files-HotReload/native-state.txt";
 const Ptr base = reinterpret_cast<Ptr>(GetModuleHandleW(nullptr));
@@ -62,6 +65,14 @@ template<class Key> Ptr lookup(Ptr map, Key key) {
     return 0;
 }
 void retain(Ptr resource) { function<void(*)(Ptr)>(0x416d820)(resource); }
+// The extension registry is small. Resolve new families by registered class name.
+Ptr registered_type(Ptr node, const char* name, unsigned depth=0) {
+    if (!node || depth>=96 || field<uint8_t>(node,0x19)) return 0;
+    const Ptr type=field<Ptr>(node,0x28);
+    if (type && field<const char*>(type,0x20) && !strcmp(field<const char*>(type,0x20),name)) return node;
+    const Ptr left=registered_type(field<Ptr>(node,0),name,depth+1);
+    return left ? left : registered_type(field<Ptr>(node,0x10),name,depth+1);
+}
 void release(Ptr resource) { function<void(*)(Ptr)>(0x416d9d0)(resource); }
 void erase(Ptr map, Ptr node) {
     auto detached = function<Ptr(*)(Ptr,Ptr)>(0x416a7f0)(map, node);
@@ -88,7 +99,9 @@ const char* begin(const wchar_t* path, const Kind& kind) {
     const Ptr key = function<Ptr(*)(const wchar_t*)>(0x4171030)(path);
     Lock lock(rm);
     const Ptr map = rm + 0xc48, node = lookup(map,key);
-    const Ptr type_node = lookup<uint32_t>(rm+0xc58, kind.id);
+    const Ptr registry=rm+0xc58;
+    const Ptr type_node = kind.id ? lookup<uint32_t>(registry,kind.id)
+                                  : registered_type(field<Ptr>(field<Ptr>(registry,0),8),kind.name);
     if (!node || !type_node) return "equipped resource not in cache";
     const Ptr type = field<Ptr>(type_node,0x28), old = field<Ptr>(node,0x28);
     if (!old || !type || strcmp(field<const char*>(type,0x20),kind.name) ||
