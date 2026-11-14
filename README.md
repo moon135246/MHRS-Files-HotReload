@@ -22,6 +22,8 @@
 
 在这次测试条件下，没有观察到引擎重新打开覆盖后的松散 MDF 读取新内容。此方法观察单个文件，不能定位具体缓存层。系统级 ETW 会话未获得管理员权限，本次使用文件级观测。原文件已按 SHA-256 核对恢复；旧版探针重新绑定保存的 holder 后，游戏在最后一次采样前退出。现行探针只请求资源并读取当前材质，已移除两个设置材质的调用。
 
+移除材质绑定后，在村内对同一手甲单独执行 `sdk.create_resource`。调用返回了资源对象，之后 8.31 秒内未观察到覆盖后的 MDF 被重新打开。首次打开通知出现在测试工具主动读取文件时，读取内容与测试版哈希一致。两次采样中六个槽均保留初值。恢复后再次核对，原文件哈希、六个槽的名称、启用状态、`S_col_R` 和 `moon_RimColor` 均与覆盖前一致，游戏持续运行。
+
 ## 复测同路径覆盖
 
 1. 安装适用于崛起的 REFramework，启用 LooseFileLoader。将项目的 `reframework/autorun/MHRS_Files_HotReload.lua` 复制到游戏的同名目录，并在 `reframework/data` 下创建 `MHRS-Files-HotReload` 目录。启动游戏，或在 REFramework 的 ScriptRunner 面板点击 Reset scripts。
