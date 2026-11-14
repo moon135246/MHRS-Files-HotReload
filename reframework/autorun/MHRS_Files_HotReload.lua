@@ -4,6 +4,7 @@ local original = base .. ".mdf2"
 local data = "MHRS-Files-HotReload/"
 local mesh_type = sdk.typeof("via.render.Mesh")
 local arm_mdf = require("MHRS_HotReload.arm_mdf")
+local outfit = require("MHRS_HotReload.outfit")
 local interval, last_id = 0, nil
 
 local function arm()
@@ -155,7 +156,12 @@ local function diagnose(mesh)
         identical = bound == res:get_address()}
 end
 
-local function run(action)
+local function run(action,req)
+    if action:sub(1,6)=="asset_" then
+        assert(not native_job,"Arm material transaction active")
+        return outfit.run(action,req,native)
+    end
+    if action:sub(1,7)=="native_" then assert(not outfit.active(),"Outfit transaction active") end
     if action=="native_abort" then return native_action(action) end
     local mesh = arm()
     if action=="textures" then return textures(mesh) end
@@ -177,6 +183,7 @@ end
 local queued, feedback
 re.on_script_reset(function()
     if native_job then native_action("native_abort") end
+    if outfit.active() then outfit.reset(native) end
 end)
 re.on_draw_ui(function()
     if not imgui.tree_node("MHRS Files HotReload") then return end
@@ -204,6 +211,6 @@ re.on_application_entry("UpdateBehavior", function()
     local req = json.load_file(data .. "request.json")
     if not req or type(req.id) ~= "string" or req.id == last_id then return end
     last_id = req.id
-    local ok, value = pcall(run, req.action)
+    local ok, value = pcall(run, req.action, req)
     json.dump_file(data .. "status.json", {id = req.id, action = req.action, ok = ok, result = ok and value or tostring(value)})
 end)

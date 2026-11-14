@@ -1,6 +1,7 @@
 """Watch the Rise arm MDF and request a refresh after a stable save."""
 import argparse
 import json
+import msvcrt
 import sys
 import time
 import uuid
@@ -11,9 +12,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_arm279 import LOGICAL, replace
 
 
-def command(channel, action):
+def command(channel, action, **payload):
+    # The Lua bridge has a single request slot. Serialize the request and its
+    # acknowledgement when a test observer and the watcher run concurrently.
+    with (channel / "channel.lock").open("a+b") as lock:
+        lock.seek(0)
+        msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            return exchange(channel, action, payload)
+        finally:
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def exchange(channel, action, payload):
     key = uuid.uuid4().hex
-    replace(channel / "request.json", json.dumps({"id": key, "action": action}).encode())
+    replace(channel / "request.json", json.dumps({"id": key, "action": action, **payload}).encode())
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline:
         time.sleep(0.1)

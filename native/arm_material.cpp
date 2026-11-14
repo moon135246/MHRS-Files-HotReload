@@ -10,10 +10,17 @@
 
 namespace {
 using Ptr = uintptr_t;
-constexpr wchar_t path[] = L"player/mod/f/pl279/f_arm279.mdf2";
+struct Kind { const wchar_t* ext; uint32_t id; const char* name; };
+constexpr Kind kinds[] = {
+    {L".mdf2",0xb16b241e,"via.render.MeshMaterialResource"},
+    {L".mesh",0x5da4e5c8,"via.render.MeshResource"},
+    {L".chain",0x5b53b1ab,"via.motion.ChainResource"},
+    {L".tex",0x3590e544,"via.render.TextureResource"},
+    {L".mmtr",0x9c0da5c7,"via.render.MasterMaterialResource"}
+};
 constexpr char result_path[] = "reframework/data/MHRS-Files-HotReload/native-state.txt";
 const Ptr base = reinterpret_cast<Ptr>(GetModuleHandleW(nullptr));
-struct Transaction { Ptr manager{}, old{}, fresh{}, key{}, parking{}; } tx;
+struct Transaction { Ptr manager{}, old{}, fresh{}, key{}, parking{}; const Kind* kind{}; } tx, master;
 template<class T> T& field(Ptr p, size_t offset) { return *reinterpret_cast<T*>(p + offset); }
 template<class Fn> Fn function(size_t rva) { return reinterpret_cast<Fn>(base+rva); }
 void write_state(const char* message, Ptr value = 0) {
@@ -71,7 +78,7 @@ Ptr unused_key(Ptr map) {
     while (lookup(map,k)) --k;
     return k;
 }
-const char* begin() {
+const char* begin(const wchar_t* path, const Kind& kind) {
     if (tx.old) return "transaction already active";
     if (!supported()) return "unsupported Rise build";
     const Ptr rm = field<Ptr>(base, 0x416d9da+0xb4b3c56);
@@ -79,12 +86,12 @@ const char* begin() {
     const Ptr key = function<Ptr(*)(const wchar_t*)>(0x4171030)(path);
     Lock lock(rm);
     const Ptr map = rm + 0xc48, node = lookup(map,key);
-    const Ptr type_node = lookup<uint32_t>(rm+0xc58, 0xb16b241e);
-    if (!node || !type_node) return "equipped MDF not in cache";
+    const Ptr type_node = lookup<uint32_t>(rm+0xc58, kind.id);
+    if (!node || !type_node) return "equipped resource not in cache";
     const Ptr type = field<Ptr>(type_node,0x28), old = field<Ptr>(node,0x28);
-    if (!old || !type || strcmp(field<const char*>(type,0x20),"via.render.MeshMaterialResource") ||
-        field<Ptr>(old,0x30)!=key || wcscmp(field<const wchar_t*>(old,8),path) ||
-        field<uint16_t>(old,0x38)!=0x101) return "cached MDF not ready or unexpected layout";
+    if (!old || !type || strcmp(field<const char*>(type,0x20),kind.name) ||
+        field<Ptr>(old,0x30)!=key || _wcsicmp(field<const wchar_t*>(old,8),path) ||
+        field<uint16_t>(old,0x38)!=0x101) return "cached resource not ready or unexpected layout";
     retain(old);
     const Ptr parking = unused_key(map);
     relocate(map,node,old,parking);
@@ -94,8 +101,22 @@ const char* begin() {
         release(old);
         return "native resource creation failed";
     }
-    tx = {rm,old,fresh,key,parking};
+    tx = {rm,old,fresh,key,parking,&kind};
     return "pending";
+}
+const char* begin_asset() {
+    FILE* f{};
+    if (fopen_s(&f,"reframework/data/MHRS-Files-HotReload/asset-path.txt","rb")!=0) return "missing resource path";
+    char bytes[2048]{};
+    const auto n=fread(bytes,1,sizeof(bytes),f);
+    fclose(f);
+    wchar_t path[2048]{};
+    if (!n || n==sizeof(bytes) || memchr(bytes,0,n) ||
+        !MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,bytes,static_cast<int>(n),path,2047) ||
+        *path==L'/' || wcspbrk(path,L"\\:\r\n") || wcsstr(path,L"..")) return "invalid resource path";
+    const auto ext=wcsrchr(path,L'.');
+    for (const auto& kind:kinds) if (ext && !_wcsicmp(ext,kind.ext)) return begin(path,kind);
+    return "unsupported resource extension";
 }
 // A newly requested texture can stay CPU-ready until a consumer runs Rise's
 // second-stage resource finalizer. Poll is called on the game thread.
@@ -107,9 +128,9 @@ bool finish_resource(Ptr r) {
 bool deps_ready(Ptr r) {
     if (!field<uint8_t>(r,0x38)) return false;
     const Ptr raw=field<Ptr>(r,0x50), mats=field<Ptr>(r,0x58);
-    const auto count=field<uint32_t>(r,0x70);
-    if (!raw || !mats || field<uint32_t>(raw,0)!=0x46444d ||
-        !count || count>256 || field<uint16_t>(raw,6)!=count) return false;
+    if (!raw || !mats || field<uint32_t>(raw,0)!=0x46444d) return false;
+    const auto count=field<uint16_t>(raw,6);
+    if (!count || count>256) return false;
     for (unsigned i=0;i<count;i++) {
         const Ptr m=mats+i*0x110, h=raw+16+i*80;
         if (field<Ptr>(m,0x30)!=h) return false;
@@ -146,9 +167,25 @@ const char* finish(bool commit) {
 }
 // No Lua ABI dependency: these lua_CFunctions take no arguments and return zero
 // Lua values. The calling script reads the status immediately after each call.
-extern "C" __declspec(dllexport) int mhrs_begin(void*) { auto msg=begin(); write_state(msg,tx.fresh); return 0; }
+extern "C" __declspec(dllexport) int mhrs_begin(void*) {
+    auto msg=begin(L"player/mod/f/pl279/f_arm279.mdf2",kinds[0]); write_state(msg,tx.fresh); return 0;
+}
+extern "C" __declspec(dllexport) int mhrs_asset(void*) { auto msg=begin_asset(); write_state(msg,tx.fresh); return 0; }
+// Keep the template and its old cache entry alive while dependent MDFs rebind.
+extern "C" __declspec(dllexport) int mhrs_hold_master(void*) {
+    if (!master.old && tx.old && tx.kind==&kinds[4] && field<uint16_t>(tx.fresh,0x38)==0x101) {
+        master=tx; tx={}; write_state("held",master.fresh);
+    } else write_state("template not ready");
+    return 0;
+}
+extern "C" __declspec(dllexport) int mhrs_resume_master(void*) {
+    if (master.old && !tx.old) { tx=master; master={}; write_state("resumed",tx.fresh); }
+    else write_state("template cannot resume");
+    return 0;
+}
 extern "C" __declspec(dllexport) int mhrs_poll(void*) {
-    write_state(!tx.fresh ? "no active transaction" : deps_ready(tx.fresh) ? "ready" : "pending",tx.fresh);
+    const bool ready=tx.fresh && (tx.kind==&kinds[0] ? deps_ready(tx.fresh) : finish_resource(tx.fresh));
+    write_state(!tx.fresh ? "no active transaction" : ready ? "ready" : "pending",tx.fresh);
     return 0;
 }
 extern "C" __declspec(dllexport) int mhrs_commit(void*) { write_state(finish(true)); return 0; }

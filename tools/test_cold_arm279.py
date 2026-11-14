@@ -69,7 +69,9 @@ def main(game, log, hold, token):
         while time.monotonic() - started < 25:
             with log.open("rb") as stream:
                 stream.seek(pos)
-                lines = stream.read().splitlines()
+                lines = [line for line in stream.read().splitlines()
+                         if line.startswith(b"Bound MDF ") or b"f_arm279.mdf2" in line
+                         or line.startswith(b"MDF dependencies")]
             if lines:
                 phase["watcher"] = lines[0].decode(errors="replace")
                 phase["ack_ns"] = time.time_ns()
