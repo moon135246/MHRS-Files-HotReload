@@ -20,7 +20,7 @@ DEST = "player/mod/moon/20261029/moon_6.tex"
 SLOT = "BaseDielectricMap"
 
 
-def variant(raw):
+def variant(raw, new_path=None):
     def name(offset):
         end = offset
         while end + 2 <= len(raw) and raw[end:end+2] != b"\0\0":
@@ -43,9 +43,13 @@ def variant(raw):
                 target = t + 16
             if name(tex) == DEST:
                 donor = tex
-    if target is None or donor is None:
+    if target is None or (new_path is None and donor is None):
         raise ValueError("Missing target or donor base texture")
     edited = bytearray(raw)
+    if new_path is not None:
+        edited.extend(bytes(-len(edited) % 8))
+        donor = len(edited)
+        edited.extend((new_path + "\0").encode("utf-16-le"))
     struct.pack_into("<Q", edited, target, donor)
     return bytes(edited)
 

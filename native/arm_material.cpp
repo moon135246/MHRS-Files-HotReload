@@ -97,6 +97,13 @@ const char* begin() {
     tx = {rm,old,fresh,key,parking};
     return "pending";
 }
+// A newly requested texture can stay CPU-ready until a consumer runs Rise's
+// second-stage resource finalizer. Poll is called on the game thread.
+bool finish_resource(Ptr r) {
+    if (!r || field<uint8_t>(r,0x38)!=1) return false;
+    if (!field<uint8_t>(r,0x39)) function<bool(*)(Ptr)>(0x416db60)(r);
+    return field<uint8_t>(r,0x39)==1;
+}
 bool deps_ready(Ptr r) {
     if (!field<uint8_t>(r,0x38)) return false;
     const Ptr raw=field<Ptr>(r,0x50), mats=field<Ptr>(r,0x58);
@@ -112,12 +119,12 @@ bool deps_ready(Ptr r) {
             n!=field<uint32_t>(h,20) || n>1024 || (n && !entries)) return false;
         for (unsigned j=0;j<n;j++) {
             const Ptr tex=field<Ptr>(entries+j*16,8);
-            if (!tex || field<uint16_t>(tex,0x38)!=0x101) return false;
+            if (!finish_resource(tex)) return false;
         }
     }
     // Invoke the same second-stage resource finalizer used by Rise's Mesh
     // setter, before exposing the fresh resource to an equipped mesh.
-    return field<uint8_t>(r,0x39) || function<bool(*)(Ptr)>(0x416db60)(r);
+    return finish_resource(r);
 }
 const char* finish(bool commit) {
     if (!tx.old) return "no active transaction";
