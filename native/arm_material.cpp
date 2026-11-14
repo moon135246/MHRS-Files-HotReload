@@ -21,11 +21,17 @@ constexpr Kind kinds[] = {
     {L".motbank",0xbc91e6b4,"via.motion.MotionBankResource"},
     {L".efx",0,"via.effect.EffectResource"},
     {L".motlist",0,"via.motion.MotionListResource"},
-    {L".rcol",0,"via.physics.RequestSetColliderResource"}
+    {L".rcol",0,"via.physics.RequestSetColliderResource"},
+    {L".uvs",0,"via.uvsequence.UVSequenceResource"},
+    {L".rtex",0,"via.render.RenderTargetTextureResource"},
+    {L".uvar",0,"via.userdata.UserVariablesResource"},
+    {L".fbxskel",0,"via.motion.FbxSkeletonResource"},
+    {L".mot",0,"via.motion.MotionResource"}
 };
 constexpr char result_path[] = "reframework/data/MHRS-Files-HotReload/native-state.txt";
 const Ptr base = reinterpret_cast<Ptr>(GetModuleHandleW(nullptr));
-struct Transaction { Ptr manager{}, old{}, fresh{}, key{}, parking{}; const Kind* kind{}; } tx, master;
+struct Transaction { Ptr manager{}, old{}, fresh{}, key{}, parking{}; const Kind* kind{}; } tx, masters[2];
+size_t master_count{};
 template<class T> T& field(Ptr p, size_t offset) { return *reinterpret_cast<T*>(p + offset); }
 template<class Fn> Fn function(size_t rva) { return reinterpret_cast<Fn>(base+rva); }
 void write_state(const char* message, Ptr value = 0) {
@@ -91,6 +97,8 @@ Ptr unused_key(Ptr map) {
     while (lookup(map,k)) --k;
     return k;
 }
+bool finish_resource(Ptr r);
+bool deps_ready(Ptr r);
 const char* begin(const wchar_t* path, const Kind& kind) {
     if (tx.old) return "transaction already active";
     if (!supported()) return "unsupported Rise build";
@@ -105,8 +113,13 @@ const char* begin(const wchar_t* path, const Kind& kind) {
     if (!node || !type_node) return "equipped resource not in cache";
     const Ptr type = field<Ptr>(type_node,0x28), old = field<Ptr>(node,0x28);
     if (!old || !type || strcmp(field<const char*>(type,0x20),kind.name) ||
-        field<Ptr>(old,0x30)!=key || _wcsicmp(field<const wchar_t*>(old,8),path) ||
-        field<uint16_t>(old,0x38)!=0x101) return "cached resource not ready or unexpected layout";
+        field<Ptr>(old,0x30)!=key || _wcsicmp(field<const wchar_t*>(old,8),path))
+        return "unexpected cached resource identity";
+    if (field<uint16_t>(old,0x38)!=0x101) {
+        // A first-use holder can precede the engine's second initialization stage.
+        const bool ready = &kind == &kinds[0] ? deps_ready(old) : finish_resource(old);
+        if (!ready) return "cached resource not initialized";
+    }
     retain(old);
     const Ptr parking = unused_key(map);
     relocate(map,node,old,parking);
@@ -203,15 +216,15 @@ extern "C" __declspec(dllexport) int mhrs_joint_outputs(void*) {
     else write_state("missing JCNS group");
     return 0;
 }
-// Keep the template and its old cache entry alive while dependent MDFs rebind.
+// Keep the dependency and its old cache entry alive while its users rebind.
 extern "C" __declspec(dllexport) int mhrs_hold_master(void*) {
-    if (!master.old && tx.old && tx.kind==&kinds[4] && field<uint16_t>(tx.fresh,0x38)==0x101) {
-        master=tx; tx={}; write_state("held",master.fresh);
+    if (master_count < sizeof(masters)/sizeof(masters[0]) && tx.old && field<uint16_t>(tx.fresh,0x38)==0x101) {
+        masters[master_count++]=tx; write_state("held",tx.fresh); tx={};
     } else write_state("template not ready");
     return 0;
 }
 extern "C" __declspec(dllexport) int mhrs_resume_master(void*) {
-    if (master.old && !tx.old) { tx=master; master={}; write_state("resumed",tx.fresh); }
+    if (master_count && !tx.old) { tx=masters[--master_count]; masters[master_count]={}; write_state("resumed",tx.fresh); }
     else write_state("template cannot resume");
     return 0;
 }

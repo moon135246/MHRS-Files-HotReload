@@ -4,10 +4,15 @@ local kinds = {
     mesh={"via.render.Mesh","via.render.MeshResource","getMesh","setMesh"},
     chain={"via.motion.Chain","via.motion.ChainResource","get_ChainAsset","set_ChainAsset"},
     jcns={"via.motion.JointConstraints","via.motion.JointConstraintsResource","get_JointConstraintsAsset","set_JointConstraintsAsset"},
+    mot={"via.motion.Motion","via.motion.MotionResource","get_Resource","set_Resource"},
     motbank={"via.motion.Motion","via.motion.MotionBankResource","get_MotionBankAsset","set_MotionBankAsset"},
     motlist={"via.motion.Motion","via.motion.MotionListResource","get_MotionList","set_MotionList"},
     efx={"via.effect.EffectPlayer","via.effect.EffectResource","get_Resource","set_Resource"},
     rcol={"via.physics.RequestSetCollider","via.physics.RequestSetColliderResource","get_Resource","set_Resource"},
+    uvs={"via.gui.GUI","via.uvsequence.UVSequenceResource","get_UVSequence","set_UVSequence"},
+    rtex={"via.gui.GUI","via.render.RenderTargetTextureResource","get_RenderTarget","set_RenderTarget"},
+    uvar={"via.motion.Motion","via.userdata.UserVariablesResource","get_UserVariables","set_UserVariables"},
+    fbxskel={"via.motion.CustomSkeleton","via.motion.FbxSkeletonResource","get_SkeletonResourceHandle","set_SkeletonResourceHandle"},
     tex={"via.render.Mesh","via.render.TextureResource"},
     mdf2={"via.render.Mesh","via.render.MeshMaterialResource","get_Material","set_Material"},
     user={"snow.player.PlayerMaterialParts"}
@@ -31,14 +36,14 @@ end
 
 local function holder(b)
     if b.i then return b.comp:call("getMaterialTexture",b.i,b.j) end
-    local owner=b.layer or b.bank or b.group or b.comp
+    local owner=b.element or b.layer or b.bank or b.group or b.comp
     return owner:call(b.kind[3])
 end
 
 local function assign(b,h)
     if b.i then b.comp:call("setMaterialTexture",b.i,b.j,h)
     else
-        local owner=b.layer or b.bank or b.group or b.comp
+        local owner=b.element or b.layer or b.bank or b.group or b.comp
         owner:call(b.kind[4],h)
     end
 end
@@ -48,7 +53,7 @@ local function scene_components(class)
         sdk.find_type_definition("via.SceneManager"),"get_CurrentScene")
     assert(scene,"Current scene unavailable")
     local components=scene:call("findComponents(System.Type)",sdk.typeof(class))
-    return components and components:get_elements() or {}
+    return type(components)=="table" and components or (components and components:get_elements() or {})
 end
 
 local function bindings(path,kind,ext)
@@ -62,11 +67,24 @@ local function bindings(path,kind,ext)
             found[#found+1]=b
         end
     end
-    local scene_scope=ext=="chain" or ext=="jcns" or ext=="motbank" or ext=="motlist" or ext=="efx" or ext=="rcol"
-    local components=scene_scope and scene_components(kind[1]) or parts(kind[1])
+    local components=scene_components(kind[1])
+    local visited={}
     for _,comp in ipairs(components) do
-        if scene_scope and not comp:call("get_GameObject"):call("get_Update") then
+        if not comp:call("get_GameObject"):call("get_Update") then
             -- A dormant NPC has no running simulation to refresh.
+        elseif ext=="uvs" then
+            if comp:call("get_Ready") then
+                for _,class in ipairs({"via.gui.Texture","via.gui.TextureSet"}) do
+                    local objects=comp:call("findObjects(System.Type)",sdk.typeof(class))
+                    local elements=type(objects)=="table" and objects or (objects and objects:get_elements() or {})
+                    for _,obj in ipairs(elements) do
+                        if not visited[obj:get_address()] then
+                            visited[obj:get_address()]=true
+                            consider({comp=comp,element=obj,kind=kind})
+                        end
+                    end
+                end
+            end
         elseif ext=="tex" then
             if comp:call("get_MaterialReady") then
                 for i=0,comp:call("get_MaterialNum")-1 do
@@ -74,6 +92,11 @@ local function bindings(path,kind,ext)
                         consider({comp=comp,i=i,j=j,kind=kind})
                     end
                 end
+            end
+        elseif ext=="mot" then
+            for i=0,comp:call("getLayerCount")-1 do
+                local layer=comp:call("getLayer",i)
+                if layer then consider({comp=comp,kind=kind,layer=layer,layer_index=i}) end
             end
         elseif ext=="jcns" then
             for i=0,comp:call("getLayerCount")-1 do
@@ -106,7 +129,8 @@ local function binding_report(list,ext)
         if ext=="chain" then r.groups=b.comp:call("getGroupCount");r.resource_groups=b.comp:call("get_ResourceGroupCount") end
         if b.layer then
             r.layer=b.layer_index
-            r.targets=b.layer:call("get_OutputTargetCount")
+            if ext=="mot" then r.frame=b.layer:call("get_Frame");r.end_frame=b.layer:call("get_EndFrame")
+            else r.targets=b.layer:call("get_OutputTargetCount") end
         end
         if ext=="mesh" then r.ready=b.comp:call("get_MeshReady");r.lods=b.comp:call("get_LodCount") end
         if ext=="motbank" then
@@ -230,16 +254,28 @@ local pending_camera
 local function camera_data(action,req)
     if action=="asset_camera_release" then pending_camera=nil;return {} end
     if action=="asset_camera_prepare" then
-        local root=assert(sdk.create_userdata(camera_type,req.path),"Camera USER unavailable")
-        assert(root:get_type_definition():get_full_name()==camera_type and root:call("get_Path"):lower()==req.path:lower(),"Unexpected camera USER")
-        pending_camera={root=root,path=req.path}
+        local typ=req.user_type or camera_type
+        local td=assert(sdk.find_type_definition(typ),"Unknown USER type")
+        assert(td:is_a("via.UserData"),"Expected via.UserData")
+        local keys=camera_keys
+        if req.user_type then
+            keys={}
+            for k,t in pairs(req.fields) do
+                local f=assert(td:get_field(k),"USER field unavailable")
+                assert(not f:is_static() and f:get_type():get_full_name()==t,"USER field type differs")
+                keys[k]=true
+            end
+        end
+        local root=assert(sdk.create_userdata(typ,req.path),"USER unavailable")
+        assert(root:get_type_definition():get_full_name()==typ and root:call("get_Path"):lower()==req.path:lower(),"Unexpected camera USER")
+        pending_camera={root=root,path=req.path,keys=keys}
         return {}
     end
     assert(pending_camera and pending_camera.path==req.path,"Camera USER has not been prepared")
     local root=pending_camera.root
     local values={}
     for k in pairs(req.edits) do
-        assert(camera_keys[k],"Unknown camera field")
+        assert(pending_camera.keys[k],"Unknown camera field")
         values[k]=root:get_field(k)
     end
     if action=="asset_camera" then
@@ -279,6 +315,91 @@ local function player_marker(path,edits,apply)
     end
     return {count=1,root=tostring(target:get_address()),time=target:call("get_TimeScale")}
 end
+-- Keep path provenance from the engine's prefab factory for otherwise identical instances.
+local prefab_instances,prefab_values={},{}
+local prefab_keys={DrawSelf=true,UpdateSelf=true,TimeScale=true}
+local marker_path="gui/01_common/prefab/pl_headmessage.pfb"
+local function apply_prefab(go,edits)
+    local previous={}
+    for key in pairs(edits) do
+        assert(prefab_keys[key],"Unsupported prefab root property")
+        previous[key]=go:call("get_"..key)
+    end
+    local ok,err=pcall(function()
+        for key,value in pairs(edits) do
+            go:call("set_"..key,value)
+            assert(go:call("get_"..key)==value,"Prefab root property mismatch")
+        end
+    end)
+    if not ok then
+        for key,value in pairs(previous) do go:call("set_"..key,value) end
+        error(err)
+    end
+    return previous
+end
+
+local function update_prefab(path,edits)
+    path=path:lower()
+    local targets={}
+    for address,entry in pairs(prefab_instances) do
+        if not entry.go:call("get_Valid") then prefab_instances[address]=nil
+        elseif entry.path==path then targets[address]=entry.go end
+    end
+    if path==marker_path then
+        for _,gui in ipairs(scene_components("via.gui.GUI")) do
+            local go=gui:call("get_GameObject")
+            local h=gui:call("get_Asset")
+            if go:call("get_Name")=="PlHeadMessage" and h and h:call("get_ResourcePath"):lower()=="gui/01_common/overhead.gui"
+                and go:call("getComponent(System.Type)",sdk.typeof("snow.gui.GuiCommonHeadMessage")) then
+                targets[go:get_address()]=go
+            end
+        end
+    end
+    local undo={}
+    local ok,err=pcall(function()
+        for _,go in pairs(targets) do
+            undo[#undo+1]={go=go,previous=apply_prefab(go,edits)}
+        end
+    end)
+    if not ok then
+        for i=#undo,1,-1 do apply_prefab(undo[i].go,undo[i].previous) end
+        error(err)
+    end
+    local values=prefab_values[path] or {}
+    for key,value in pairs(edits) do values[key]=value end
+    prefab_values[path]=values
+    return {count=#undo}
+end
+
+for _,method in ipairs(sdk.find_type_definition("via.Prefab"):get_methods()) do
+    if method:get_name()=="instantiate" then
+        sdk.hook(method,function(args)
+            local prefab=sdk.to_managed_object(args[2])
+            thread.get_hook_storage().prefab_path=prefab and prefab:call("get_ResourcePath")
+        end,function(retval)
+            local path=thread.get_hook_storage().prefab_path
+            local go=sdk.to_managed_object(retval)
+            if path and path~="" and go then
+                path=path:lower()
+                prefab_instances[go:get_address()]={go=go,path=path}
+                if prefab_values[path] then
+                    local ok,err=pcall(apply_prefab,go,prefab_values[path])
+                    if not ok then log.error("[MHRS-Files-HotReload] "..tostring(err)) end
+                end
+            end
+            return retval
+        end)
+    end
+end
+local last_prefab_cleanup=0
+re.on_application_entry("UpdateBehavior",function()
+    if os.clock()-last_prefab_cleanup<5 then return end
+    last_prefab_cleanup=os.clock()
+    for address,entry in pairs(prefab_instances) do
+        if not entry.go:call("get_Valid") then prefab_instances[address]=nil end
+    end
+end)
+
 local view_fields={BaseFps=true,Priority=true,Visible=true,HitVisible=true,Overlay=true,DepthTest=true,
     StencilTest=true,GUISortTarget=true,Detonemap=true,DegammaVertexColor=true,UseGUIPostImage=true}
 local function gui_views(path,edits,apply)
@@ -291,17 +412,41 @@ local function gui_views(path,edits,apply)
             if view then
                 local row={component=tostring(c:get_address()),values={}}
                 table.insert(values,row)
-                for key,value in pairs(edits) do
+                local elements={}
+                for id,value in pairs(edits) do
+                    local class,name,prop=id:match("^([^|]+)|([^|]+)|([^|]+)$")
+                    local key=prop or id
                     assert(view_fields[key],"Unsupported GUI property")
-                    local old=view:call("get_"..key)
-                    assert(old~=nil,"GUI property unavailable")
-                    table.insert(ops,{view=view,key=key,value=value,old=old,row=row})
-                    row.values[key]=old
+                    local targets={view}
+                    if class then
+                        assert(class:match("^via%.gui%.[%w_]+$"),"Invalid GUI class")
+                        if not elements[class] then
+                            local all=c:call("findObjects(System.Type)",sdk.typeof(class))
+                            elements[class]=type(all)=="table" and all or (all and all:get_elements() or {})
+                        end
+                        targets={}
+                        for _,el in ipairs(elements[class]) do
+                            if el:call("get_Name")==name and el:get_type_definition():get_full_name()==class then
+                                table.insert(targets,el)
+                            end
+                        end
+                    end
+                    for _,target in ipairs(targets) do
+                        local old=target:call("get_"..key)
+                        assert(old~=nil,"GUI property unavailable")
+                        table.insert(ops,{view=target,key=key,id=id,value=value,old=old,row=row})
+                        row.values[id]=old
+                    end
                 end
             end
         end
     end
-    assert(#values>0,"No ready GUI views for this path")
+    assert(#values>0 and (#ops>0 or not next(edits)),"No matching ready GUI object for this path")
+    for id in pairs(edits) do
+        local matched=false
+        for _,op in ipairs(ops) do if op.id==id then matched=true;break end end
+        assert(matched,"No GUI object matched "..id)
+    end
     if apply then
         local touched=0
         local ok,err=pcall(function()
@@ -310,7 +455,7 @@ local function gui_views(path,edits,apply)
                 op.view:call("set_"..op.key,op.value)
                 local actual=op.view:call("get_"..op.key)
                 assert(actual==op.value or (op.key=="BaseFps" and math.abs(actual-op.value)<0.0001),"GUI readback mismatch")
-                op.row.values[op.key]=actual
+                op.row.values[op.id]=actual
             end
         end)
         if not ok then
@@ -323,9 +468,11 @@ end
 function M.active() return job~=nil or master~=nil end
 function M.reset(native)
     if job then M.run("asset_abort",{},native) end
-    if master then M.run("asset_master_abort",{},native) end
+    while master do M.run("asset_master_abort",{},native) end
 end
 function M.run(action,req,native)
+    if action=="asset_prefab_forget" then prefab_values[req.path:lower()]=nil;return {} end
+    if action=="asset_prefab" then return update_prefab(req.path,req.edits) end
     if action=="asset_marker" or action=="asset_marker_inspect" then
         return player_marker(req.path,req.edits,action=="asset_marker")
     end
@@ -336,12 +483,14 @@ function M.run(action,req,native)
         return gui_views(req.path,req.edits or {},action=="asset_gui")
     end
     if action=="asset_master_begin" then
-        assert(not job and not master and req.path:lower():match("%.mmtr$"),"Invalid template transaction")
+        local ext=req.path:lower():match("%.([a-z0-9]+)$")
+        local allowed={mmtr=true,uvs=true,uvar=true,tex=true,mot=true,rtex=true,mesh=true,mdf2=true}
+        assert(not job and (not master or (master.held and ext=="uvs" and master.ext=="tex")) and allowed[ext],"Invalid dependency transaction")
         local f=assert(io.open("MHRS-Files-HotReload/asset-path.txt","wb"))
         f:write(req.path); f:close()
         local state,address=native("asset")
         assert(state=="pending",state)
-        master={held=false}
+        master={held=false,parent=master,ext=ext}
         return {state=state,resource=address}
     end
     if action=="asset_master_poll" then
@@ -359,7 +508,7 @@ function M.run(action,req,native)
         local commit=action=="asset_master_commit"
         local state=native(commit and "commit" or "abort")
         assert(state==(commit and "committed" or "rolled back"),state)
-        master=nil
+        master=master.parent
         return {state=state}
     end
     if action=="asset_abort" then
@@ -412,6 +561,7 @@ function M.run(action,req,native)
         local res=assert(sdk.create_resource(job.kind[2],job.path))
         local address=tostring(res:get_address())
         local holder_type=job.ext=="motlist" and "via.motion.MotionListBaseResourceHolder" or job.kind[2].."Holder"
+        if job.ext=="mot" then holder_type="via.motion.MotionBaseResourceHolder" end
         local h=res:create_holder(holder_type)
         res:release()
         assert(h and address==job.fresh,"Cache resource mismatch")
@@ -455,7 +605,8 @@ function M.run(action,req,native)
     if ext=="user" then return user_data(path,req.edits or {},action=="asset_user") end
     local list=bindings(path,kind,ext)
     if action=="asset_inspect" then return {bindings=binding_report(list,ext)} end
-    assert(action=="asset_begin" and not job and (not master or (master.held and ext=="mdf2")),"Invalid asset request")
+    assert(action=="asset_begin" and not job and (not master or (master.held and
+        (ext=="mdf2" or ext=="efx" or ext=="motlist"))),"Invalid asset request")
     assert(#list>0,"No matching active resource user")
     local f=assert(io.open("MHRS-Files-HotReload/asset-path.txt","wb"))
     f:write(list[1].path); f:close()

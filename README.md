@@ -4,13 +4,15 @@
 
 ## 安装与实测范围
 
+本轮逐项对照荒野的 22 种主格式，并用随机新路径验证了 18 类崛起资源。格式对应关系、具体读数、未覆盖的行为和复测命令见[荒野功能对照与崛起冷路径实测](docs/wilds-parity.md)。
+
 将项目的 `reframework` 目录合并到游戏目录，启用 REFramework 的 LooseFileLoader。已运行的游戏安装新版原生模块时，可先在 ScriptRunner 中重载脚本释放旧 DLL，再复制新版。使用 Windows Python 运行一个服装监听器。它同时处理原有的手甲 MDF。先退出单文件监听器，再执行：
 
 ```powershell
 python tools/watch_outfit.py "F:\SteamLibrary\steamapps\common\MonsterHunterRise"
 ```
 
-监听器查找 `natives/stm` 下的松散文件。物理链、关节约束、动作库、动作列表、特效和碰撞按资源路径匹配场景中正在更新的对象；GUI 匹配已就绪的视图，服装匹配本地猎人。每次保存后，终端打印绑定、字段更新或跳过原因。
+监听器查找 `natives/stm` 下的松散文件。物理、动作、渲染、特效和碰撞按资源路径匹配当前场景中正在更新的组件。GUI 匹配已就绪的视图，头盔 USER 匹配本地猎人。每次保存后，终端打印绑定、字段更新或跳过原因。
 
 | 资源 | 村内实机测试 |
 | --- | --- |
@@ -22,14 +24,14 @@ python tools/watch_outfit.py "F:\SteamLibrary\steamapps\common\MonsterHunterRise
 | `.mmtr.220427553` | 将 `Moon_Mask_Dissolve` 换为另一份已有的崛起版模板，约 3.2 秒完成模板及手甲、腰甲两份 MDF 的重载。恢复原模板后再次核对两个组件。依赖查找限于磁盘上有松散 MDF 的已穿戴部件。 |
 | `.user.2` | 按文件差异写入头盔的 `PlayerUserDataPartsHelm` 实例。实测 `FullFace`、`HairChainStop` 和 `HairShapeData[0]` 可修改并恢复。验证的是实例字段读数。外观或模拟下次何时使用各字段，取决于游戏的消费时机。支持现有头发与脸部记录、相同数组长度及空的 `_ChainChangeList`。 |
 | `.mdf2.23` | 原路径整份材质替换。手甲的冷贴图引用与恢复结果见下节。 |
-| `.efx.2818730` | 已启动的 EffectPlayer 跨帧绑定新资源并重新播放。当前角色 `effect_player00` 的任务数和发射器数都完成 4 → 2 → 4，三次采样均处于播放状态。其他系统直接生成的独立特效和依赖文件级联尚未验证。 |
+| `.efx.2818730` | 已启动的 EffectPlayer 跨帧绑定新资源并重新播放。当前角色 `effect_player00` 的任务数和发射器数都完成 4 → 2 → 4。另测得只保存被引用的冷路径 UVS 即可触发正在播放的玩家 EFX 重载。 |
 | `.motlist.528` | 村民 `nid018` 活动库 10 的动作数完成 7 → 4 → 7。更新活动库持有的列表。已在播放的片段逐帧更新、单独保存外部 `.mot.495` 尚未验证。 |
 | `.rcol.20` | 通过 RequestSetCollider 的请求组绑定新资源。同一 NPC 设施碰撞文件的 42 个组全部将外圈球半径从 1.0 改为 1.25，恢复后均为 1.0。已核对运行时形状；实际接触事件、伤害判定及其他形状布局尚未验证。 |
-| `.gui.430033` | 保留已创建的视图，按文件差异更新根 View 的标量属性。村内 49 个 `SpeechBalloon.gui` 视图的 Visible 和 BaseFps 同步完成 可见/60 → 隐藏/30 → 可见/60。可识别可见性、优先级、帧率及若干布尔渲染开关，子控件或结构编辑会报告跳过。 |
-| `.pfb.17` | 仅支持 `gui/01_common/prefab/pl_headmessage.pfb` 根对象的 TimeScale。用对象名称、标记组件和 GUI 资源路径匹配已生成的实例。同一玩家头顶标记完成 −1 → 0.75 → −1。 |
+| `.gui.430033` | 更新已创建视图和可唯一识别的子节点的标量属性。村内 49 个 `SpeechBalloon.gui` 文字节点的 Visible 与根视图 BaseFps 完成 可见/60 → 隐藏/37 → 可见/60。结构编辑会报告跳过。 |
+| `.pfb.17` | 通过游戏预制体工厂按路径跟踪实例，更新可识别根对象的 TimeScale、DrawSelf 和 UpdateSelf，包括后续生成的实例。玩家头顶标记另有已存在实例的匹配。实测范围见冷路径对照表。 |
 | `.user.2` 固定相机 | 新增 `snow.camera.FixedCamera.FixedCameraUserData_End` 的四个插值字段。探针先持有 `roomservice_end.user` 根实例，保存后同一实例的插值时长完成 60 → 24 → 60，曲线开关完成 开 → 关 → 开。未触发客房相机过渡。 |
 
-GUI、玩家标记 PFB 和 USER 采用文件差异更新。将原版或当前正在使用的文件放入松散目录后启动监听器，再编辑并保存。运行中首次新增这些文件时，监听器先记录该版本作为基线，从下一次保存起应用差异。首次保存前就改过的值需要与游戏当前状态核对。
+GUI、PFB 和 USER 采用文件差异更新。默认以启动时的松散文件或运行中首次看到的文件作为基线。另可传入同一游戏补丁版本的原始资源目录 `--baseline-root "<原版 natives/stm>"`，让首次保存就能计算差异。指定 `--rsz-schema "<rszmhrise.json>"` 可启用单根标量 USER 的类型检查与实时写入。
 
 如果游戏启动后才第一次把某个原版资源放到 `natives/stm`，LooseFileLoader 可能已缓存该路径没有松散文件的结果。实测腰甲在这种情况下仍读到原版 4 个约束输出。在 REFramework 的 **LooseFileLoader → Debug** 取消勾选 **Enable file cache** 后再次保存，腰甲立即读到松散文件的 11 个输出。监听器在绑定单组 JCNS 前会对照磁盘和新资源的输出数量，数量不符时回滚，保留原约束层。这项检查只比较数量。
 

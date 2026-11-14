@@ -58,3 +58,48 @@ def marker_diff(previous, current):
     if offset != new_offset or previous[:offset] != current[:offset] or previous[offset+4:] != current[offset+4:]:
         raise ValueError("Only root TimeScale is supported for this prefab")
     return {} if old == new else {"TimeScale": new}
+
+
+def prefab_root_fields(raw):
+    """Locate the first serialized GameObject, checking the object index and CRC."""
+    if len(raw) < 68 or raw[:4] != b"PFB\0" or not struct.unpack_from("<I", raw, 4)[0]:
+        raise ValueError("Expected Rise prefab")
+    obj, parent = struct.unpack_from("<ii", raw, 56)
+    start = struct.unpack_from("<Q", raw, 48)[0]
+    if obj != 0 or parent != -1 or raw[start:start+4] != b"RSZ\0" or start + 52 > len(raw):
+        raise ValueError("Unsupported prefab root table")
+    version, roots, instances, _ = struct.unpack_from("<4I", raw, start+4)
+    info, data = struct.unpack_from("<QQ", raw, start+24)
+    if (version != 16 or not 0 < roots < instances or info < 48 + roots*4 or
+            data < info+8*instances or start+data+4 > len(raw) or
+            struct.unpack_from("<I", raw, start+48)[0] != 1 or
+            struct.unpack_from("<II", raw, start+info+8) != (0xC902A417, 0x0CE8A1F8)):
+        raise ValueError("Unsupported serialized GameObject layout")
+    cursor = start + data
+    for _ in range(2):  # Name, Tag
+        cursor = (cursor+3) & ~3
+        count = struct.unpack_from("<I", raw, cursor)[0]
+        cursor += 4 + count*2
+        if count > 65536 or cursor > len(raw) or (count and raw[cursor-2:cursor] != b"\0\0"):
+            raise ValueError("Invalid prefab root string")
+    update, draw = struct.unpack_from("<BB", raw, cursor)
+    time = (cursor+5) & ~3
+    scale = struct.unpack_from("<f", raw, time)[0]
+    if max(update, draw) > 1 or not math.isfinite(scale) or (scale < 0 and scale != -1):
+        raise ValueError("Invalid prefab root properties")
+    return {"UpdateSelf": (cursor, 1, bool(update)), "DrawSelf": (cursor+1, 1, bool(draw)),
+            "TimeScale": (time, 4, scale)}
+
+
+def prefab_root_diff(previous, current):
+    old, new = prefab_root_fields(previous), prefab_root_fields(current)
+    remaining, edits = bytearray(current), {}
+    for key, (offset, size, value) in new.items():
+        if old[key][:2] != (offset, size):
+            raise ValueError("Prefab layout changed")
+        if value != old[key][2]:
+            remaining[offset:offset+size] = previous[offset:offset+size]
+            edits[key] = value
+    if remaining != previous:
+        raise ValueError("Edit includes unsupported prefab fields or structure")
+    return edits
