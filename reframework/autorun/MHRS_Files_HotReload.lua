@@ -3,6 +3,7 @@ local base = "player/mod/f/pl279/f_arm279"
 local original = base .. ".mdf2"
 local data = "MHRS-Files-HotReload/"
 local mesh_type = sdk.typeof("via.render.Mesh")
+local arm_mdf = require("MHRS_HotReload.arm_mdf")
 local interval, last_id = 0, nil
 
 local function arm()
@@ -47,17 +48,62 @@ local function normalized(path)
     return (path or ""):lower():gsub("\\", "/"):gsub("^@", "")
 end
 
+local function diagnose(mesh)
+    local methods = {}
+    for _, name in ipairs({"via.ResourceManager", "via.ResourceHolder", "via.render.MeshMaterialResourceHolder",
+        "via.render.MeshMaterialResource", "via.Resource", "via.render.Mesh", "via.io.file", "via.io.FileStream",
+        "via.io.fileStream", "via.io.NativeFileStream", "via.io.Stream", "System.IO.File"}) do
+        local td = sdk.find_type_definition(name)
+        local names = {}
+        if td then
+            for _, method in ipairs(td:get_methods()) do
+                local n = method:get_name()
+                if name ~= "via.render.Mesh" or n:lower():find("reload") or n:find("Material") then
+                    if name:find("^via%.io%.") then
+                        local args = {}
+                        for _, t in ipairs(method:get_param_types()) do args[#args + 1] = t:get_full_name() end
+                        n = n .. "(" .. table.concat(args, ",") .. ")"
+                    end
+                    names[#names + 1] = n
+                end
+            end
+        end
+        methods[name] = {found = td ~= nil, methods = names}
+    end
+    local holder = mesh:call("get_Material")
+    assert(normalized(holder:call("get_ResourcePath")) == original, "Unexpected target")
+    local res = assert(sdk.create_resource("via.render.MeshMaterialResource", original))
+    -- REFramework c4b13148: Resource::create_holder stores Resource* immediately
+    -- after REManagedObject::runtime_size() (16 bytes on Rise).
+    local bound = holder:read_qword(0x10)
+    return {methods = methods, bound = tostring(bound), requested = tostring(res:get_address()),
+        identical = bound == res:get_address()}
+end
+
 local function run(action)
     local mesh = arm()
     if action == "inspect" then return inspect(mesh) end
-    assert(action == "request_same", "Unknown action")
+    if action == "diagnose" then return diagnose(mesh) end
     local before = inspect(mesh)
     local bound = normalized(before.path)
     assert(bound == original, "Unexpected material: " .. tostring(before.path))
+    assert(before.ready, "Arm material not ready")
+    if action == "capture" then return arm_mdf.begin(mesh, before) end
+    if action == "refresh" then return arm_mdf.refresh(mesh, before) end
+    assert(action == "request_same", "Unknown action")
     local path = original
     local res = assert(sdk.create_resource("via.render.MeshMaterialResource", path), "Resource unavailable")
     return {before = before, requested = path, resource = tostring(res:get_address())}
 end
+
+local queued, feedback
+re.on_draw_ui(function()
+    if not imgui.tree_node("MHRS Files HotReload") then return end
+    if imgui.button("Capture f_arm279 before editing") then queued = "capture" end
+    if imgui.button("Read MDF and refresh arm colors") then queued = "refresh" end
+    if feedback then imgui.text(feedback) end
+    imgui.tree_pop()
+end)
 
 -- A request is executed once per id. The host requests another independent sample
 -- after the engine has had time to finish rendering with the assigned holder.
@@ -65,6 +111,13 @@ local initial = json.load_file(data .. "request.json")
 last_id = initial and initial.id
 json.dump_file(data .. "status.json", {state = "loaded"})
 re.on_application_entry("UpdateBehavior", function()
+    if queued then
+        local action = queued
+        queued = nil
+        local ok, value = pcall(run, action)
+        feedback = ok and (action == "capture" and ("Captured: " .. value.bindings)
+            or ("Updated: " .. value.changed)) or tostring(value)
+    end
     if os.clock() < interval then return end
     interval = os.clock() + 0.25
     local req = json.load_file(data .. "request.json")

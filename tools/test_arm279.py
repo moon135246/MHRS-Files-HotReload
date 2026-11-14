@@ -66,7 +66,7 @@ def replace(path, data):
         tmp.unlink(missing_ok=True)
 
 
-def main(game, observe_opens=False):
+def main(game, observe_opens=False, refresh=False):
     run = Path(__file__).resolve().parents[1] / "local-tests" / uuid.uuid4().hex
     run.mkdir(parents=True)
     channel = game / "reframework/data/MHRS-Files-HotReload"
@@ -128,6 +128,8 @@ def main(game, observe_opens=False):
         raise RuntimeError("Test marker already present on equipped arm")
     slot_names = [s["name"] for s in baseline["slots"]]
     old_values = [s["moon_RimColor"] for s in baseline["slots"]]
+    if refresh:
+        command("capture", "capture")
     changed = False
     observer = None
     try:
@@ -143,8 +145,14 @@ def main(game, observe_opens=False):
             trace["armed"] = json.loads(observer.stdout.readline())
             save()
         sample("overwrite_only")
-        command("request_same", "request_same")
+        if refresh:
+            command("identity", "diagnose")
+            command("refresh", "refresh")
+        else:
+            command("request_same", "request_same")
         sample("after_same")
+        if refresh and report["observations"]["after_same"]["marker_slots"] != len(slot_names):
+            raise RuntimeError("Changed material values did not reach every slot")
         if observe_opens:
             time.sleep(5)
             sample("after_same_delayed")
@@ -171,6 +179,8 @@ def main(game, observe_opens=False):
             replace(target, original)
             report["restored_sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
             save()
+            if refresh:
+                command("refresh_restored", "refresh")
             sample("restored")
 
 
@@ -178,5 +188,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("game", type=Path, help="MonsterHunterRise installation directory")
     parser.add_argument("--observe-opens", action="store_true", help="Monitor the replaced NTFS file until a control read")
+    parser.add_argument("--refresh", action="store_true", help="Read the original MDF path and apply changed arm colors")
     args = parser.parse_args()
-    main(args.game, args.observe_opens)
+    main(args.game, args.observe_opens, args.refresh)
