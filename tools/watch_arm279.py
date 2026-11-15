@@ -3,6 +3,7 @@ import argparse
 import errno
 import json
 import msvcrt
+import os
 import sys
 import time
 import uuid
@@ -12,7 +13,25 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from file_changes import DirectoryChanges
 from material_layout import MaterialValidator, materials
-from test_arm279 import LOGICAL, replace
+LOGICAL = "player/mod/f/pl279/f_arm279.mdf2"
+
+
+def replace(path, data):
+    tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        with tmp.open("xb") as f:
+            f.write(data)
+        # The game's frame callback can have the destination open briefly.
+        for attempt in range(12):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError as error:
+                if error.winerror not in (5, 32, 33) or attempt == 11:
+                    raise
+                time.sleep(.025)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def command(channel, action, **payload):

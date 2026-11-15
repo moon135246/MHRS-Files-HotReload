@@ -194,6 +194,10 @@ end)
 local initial = json.load_file(data .. "request.json")
 last_id = initial and initial.id
 json.dump_file(data .. "status.json", {state = "loaded"})
+local start_watcher = package.loadlib(watch_dll, "mhrs_start_watcher")
+if not (start_watcher and start_watcher(true)) then
+    log.warn("[MHRS-Files-HotReload] Packaged watcher unavailable. Check the installation or run tools/watch_outfit.py from source.")
+end
 re.on_application_entry("UpdateBehavior", function()
     local now = os.clock()
     if now < next_check then return end

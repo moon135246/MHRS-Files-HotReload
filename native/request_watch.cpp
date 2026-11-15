@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <cstddef>
+#include <filesystem>
 
 namespace {
 constexpr wchar_t channel[] = L"reframework/data/MHRS-Files-HotReload";
@@ -9,6 +10,53 @@ HANDLE directory = INVALID_HANDLE_VALUE;
 OVERLAPPED operation{};
 alignas(DWORD) unsigned char buffer[8192];
 ULONGLONG next_open = 0;
+
+struct WatcherProcess {
+    HANDLE job = nullptr;
+    HANDLE process = nullptr;
+
+    ~WatcherProcess() {
+        if (job) CloseHandle(job);
+        if (process) CloseHandle(process);
+    }
+
+    bool start() {
+        if (process && WaitForSingleObject(process, 0) == WAIT_TIMEOUT) return true;
+        if (process) { CloseHandle(process); process = nullptr; }
+        wchar_t game_exe[32768];
+        const DWORD length = GetModuleFileNameW(nullptr, game_exe, ARRAYSIZE(game_exe));
+        if (!length || length == ARRAYSIZE(game_exe)) return false;
+        const auto game = std::filesystem::path(game_exe).parent_path();
+        const auto exe = game / channel / L"watcher" / L"MHRS-Watcher.exe";
+        if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+        if (!job) {
+            job = CreateJobObjectW(nullptr, nullptr);
+            if (!job) return false;
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+                CloseHandle(job);
+                job = nullptr;
+                return false;
+            }
+        }
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION child{};
+        if (!CreateProcessW(exe.c_str(), nullptr, nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED,
+                            nullptr, game.c_str(), &startup, &child)) return false;
+        const bool started = AssignProcessToJobObject(job, child.hProcess) && ResumeThread(child.hThread) != DWORD(-1);
+        CloseHandle(child.hThread);
+        if (!started) {
+            TerminateProcess(child.hProcess, 1);
+            CloseHandle(child.hProcess);
+            return false;
+        }
+        process = child.hProcess;
+        return true;
+    }
+};
+WatcherProcess watcher;
 
 void close_watch() {
     if (directory != INVALID_HANDLE_VALUE) {
@@ -87,4 +135,9 @@ extern "C" __declspec(dllexport) int mhrs_close_request_watch(void*) {
     close_watch();
     next_open = 0;
     return 0;
+}
+
+extern "C" __declspec(dllexport) int mhrs_start_watcher(void*) {
+    try { return watcher.start() ? 1 : 0; }
+    catch (...) { return 0; }
 }

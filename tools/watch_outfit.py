@@ -15,8 +15,7 @@ from gui_view import view_diff
 from scalar_user import scalar_layout, scalar_diff
 from scene_data import camera_fields, prefab_root_diff
 from resource_links import consumers, logical_path, ResourceLinks
-from watch_arm279 import command, signature
-from test_arm279 import LOGICAL
+from watch_arm279 import LOGICAL, command, signature
 
 SUFFIXES = (".chain.48", ".jcns.21", ".motbank.3", ".motlist.528", ".efx.2818730", ".rcol.20",
             ".mesh.2109148288", ".tex.28", ".mdf2.23", ".user.2", ".mmtr.220427553", ".gui.430033", ".pfb.17",

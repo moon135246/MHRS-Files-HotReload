@@ -6,19 +6,18 @@
 
 ## 安装与实测范围
 
-从 [v1.0.0 正式版](https://github.com/moon135246/MHRS-Files-HotReload/releases/tag/v1.0.0) 下载 `MHRS-Files-HotReload-v1.0.0.zip` 并解压。下文的 `reframework` 和 `tools` 均位于解压目录中。
+1. 先安装崛起版 REFramework，并启用 **LooseFileLoader**。更新旧版时先退出游戏，停止原来手动运行的 Python 监听器。
+2. 下载 `MHRS-Files-HotReload-v1.0.0.zip`，将完整 ZIP 拖入 Fluffy Mod Manager，或放入 Fluffy 的 `Games/MHRISE/Mods` 后刷新列表。选择 **Monster Hunter Rise**，启用 **MHRS-Files-HotReload**。[v1.0.0 玩家安装包](https://github.com/moon135246/MHRS-Files-HotReload/releases/tag/v1.0.0)
+3. 启动游戏。插件会自动启动随包的 Windows x64 监听器。要在游戏运行中新增或删除松散文件，在 REFramework 的 **LooseFileLoader → Debug** 中关闭 **Enable file cache**。实测版本重启游戏后会重新勾选此项。
+4. 保存或删除 `natives/stm` 下的资源。监听状态可在游戏目录的 `reframework/data/MHRS-Files-HotReload/watcher.log` 中查看。退出游戏时监听器一并结束，此时可在 Fluffy 中停用或更新插件。
+
+v1.0.0 安装包已用 Fluffy 在 Steam 版崛起实测。村内覆盖 279 装备的贴图后，角色身上出现了测试用的洋红色。新增、覆盖和删除水车动作文件时，同一水车的动作末帧依次为 239、119、89、239。279 腰甲约束在新增和覆盖后由 4 项变为 3 项、2 项，删除后在重建装备时恢复 4 项。
 
 279 实穿、同编号换装、重建玩家、保留的预制体工厂和 18 类资源的逐项读数见[同路径替换与删除回退验收](docs/reentry-18.md)。荒野格式对应关系和既有的随机新路径实验见[冷加载对照](docs/wilds-parity.md)。
 
-道具箱的单件外观预览会在小窗相机重新启用时校准渲染目标。关闭预览后再替换或删除资源，重新打开时，单件小窗与整身预览各自使用当前目标。更新这个修复需要替换游戏内脚本和外部监听器，运行中的监听器需从新版 `tools` 目录重新启动。
+道具箱的单件外观预览会在小窗相机重新启用时校准渲染目标。关闭预览后再替换或删除资源，重新打开时，单件小窗与整身预览各自使用当前目标。
 
-将项目的 `reframework` 目录合并到游戏目录，启用 REFramework 的 LooseFileLoader。更新已加载的 DLL 时，可以退出游戏，复制新版，再启动游戏。保留解压目录中的整个 `tools` 文件夹，里面包含监听器、16.0.2 原版引用索引和模板接口摘要。使用 Windows Python 运行通用资源监听器。它同时处理原有的手甲 MDF。先退出单文件监听器，再执行：
-
-```powershell
-python tools/watch_outfit.py "F:\SteamLibrary\steamapps\common\MonsterHunterRise"
-```
-
-在本机 REFramework 的 **LooseFileLoader → Debug** 中关闭 **Enable file cache**，再测试游戏运行中新增、删除和放回文件。此开关在本次实测中会随游戏重启重新启用。正常换装与文件回退在同一进程内完成。
+开发者从源码运行时可手动部署仓库中的 `reframework`，然后执行 `python tools/watch_outfit.py "<游戏目录>"`。同一游戏目录只运行一个监听器。下文的 Python 命令用于源码开发和实机复测。构建玩家包使用 Windows x64 Python 3.12、PyInstaller 6 和 Visual Studio C++ x64 工具链，运行 `python tools/build_player_package.py dist/MHRS-Files-HotReload-v1.0.0.zip`。
 
 Windows 监听器在启动时扫描一次，随后等待目录变更通知。游戏端的 `request_watch.dll` 让脚本在有新请求时才读取 JSON。预制体回收和已修改 HUD 的重新绑定分帧执行。村内移动和训练场出招的帧时间、后台开销及复测结果见[性能对照](docs/performance.md)。
 

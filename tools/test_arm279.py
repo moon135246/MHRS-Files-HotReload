@@ -2,7 +2,6 @@
 import argparse
 import hashlib
 import json
-import os
 import struct
 import subprocess
 import sys
@@ -11,9 +10,12 @@ import uuid
 from pathlib import Path
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from watch_arm279 import LOGICAL, replace
+
+
 RIM = (1.0, 0.0, 1.0, 1.0)
 COL = (0.0, 1.0, 0.0, 1.0)
-LOGICAL = "player/mod/f/pl279/f_arm279.mdf2"
 
 
 def test_variant(original):
@@ -54,24 +56,6 @@ def test_variant(original):
     if not changes or data == original:
         raise ValueError("No testable differences")
     return bytes(data), changes
-
-
-def replace(path, data):
-    tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    try:
-        with tmp.open("xb") as f:
-            f.write(data)
-        # The game's frame callback can have the destination open briefly.
-        for attempt in range(12):
-            try:
-                os.replace(tmp, path)
-                break
-            except PermissionError as error:
-                if error.winerror not in (5, 32, 33) or attempt == 11:
-                    raise
-                time.sleep(.025)
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 def main(game, observe_opens=False, refresh=False):
