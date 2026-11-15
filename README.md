@@ -1,18 +1,36 @@
-# MHRS-Files-HotReload
+# MHRS-Files-HotReload 1.0.0
 
-《怪物猎人：崛起》资源热加载实验项目。保存松散文件后，插件在游戏线程更新相应的资源或实例属性。支持服装、物理、特效、动作列表，以及下表列出的 GUI、预制体和 USER 属性。已在 Steam 16.0.2.0、Build 17920865、REFramework c4b13148 上验证。
+《怪物猎人：崛起》松散资源热加载工具。游戏运行时可以直接用 B 套覆盖同路径的 A 套，也可以删除松散文件并在下次使用时读取 PAK 原件。支持 18 类资源。实测环境为 Steam 16.0.2.0、Build 17920865、REFramework c4b13148。
+
+本项目在开发过程中借鉴了 Stellar 的《怪物猎人：荒野》热加载工具，尤其是文件监听、同路径资源重载和场景刷新。感谢作者公开实现，供崛起版开发时对照。[荒野热加载项目](https://github.com/AleksKavil/MHWS-Files-HotReload) · [致谢](#致谢)
 
 ## 安装与实测范围
 
-本轮逐项对照荒野的 22 种主格式，并用随机新路径验证了 18 类崛起资源。格式对应关系、具体读数、未覆盖的行为和复测命令见[荒野功能对照与崛起冷路径实测](docs/wilds-parity.md)。
+从 [v1.0.0 正式版](https://github.com/moon135246/MHRS-Files-HotReload/releases/tag/v1.0.0) 下载 `MHRS-Files-HotReload-v1.0.0.zip` 并解压。下文的 `reframework` 和 `tools` 均位于解压目录中。
 
-将项目的 `reframework` 目录合并到游戏目录，启用 REFramework 的 LooseFileLoader。已运行的游戏安装新版原生模块时，可先在 ScriptRunner 中重载脚本释放旧 DLL，再复制新版。使用 Windows Python 运行一个服装监听器。它同时处理原有的手甲 MDF。先退出单文件监听器，再执行：
+279 实穿、同编号换装、重建玩家、保留的预制体工厂和 18 类资源的逐项读数见[同路径替换与删除回退验收](docs/reentry-18.md)。荒野格式对应关系和既有的随机新路径实验见[冷加载对照](docs/wilds-parity.md)。
+
+道具箱的单件外观预览会在小窗相机重新启用时校准渲染目标。关闭预览后再替换或删除资源，重新打开时，单件小窗与整身预览各自使用当前目标。更新这个修复需要替换游戏内脚本和外部监听器，运行中的监听器需从新版 `tools` 目录重新启动。
+
+将项目的 `reframework` 目录合并到游戏目录，启用 REFramework 的 LooseFileLoader。更新已加载的 DLL 时，可以退出游戏，复制新版，再启动游戏。保留解压目录中的整个 `tools` 文件夹，里面包含监听器、16.0.2 原版引用索引和模板接口摘要。使用 Windows Python 运行通用资源监听器。它同时处理原有的手甲 MDF。先退出单文件监听器，再执行：
 
 ```powershell
 python tools/watch_outfit.py "F:\SteamLibrary\steamapps\common\MonsterHunterRise"
 ```
 
-监听器查找 `natives/stm` 下的松散文件。物理、动作、渲染、特效和碰撞按资源路径匹配当前场景中正在更新的组件。GUI 匹配已就绪的视图，头盔 USER 匹配本地猎人。每次保存后，终端打印绑定、字段更新或跳过原因。
+在本机 REFramework 的 **LooseFileLoader → Debug** 中关闭 **Enable file cache**，再测试游戏运行中新增、删除和放回文件。此开关在本次实测中会随游戏重启重新启用。正常换装与文件回退在同一进程内完成。
+
+Windows 监听器在启动时扫描一次，随后等待目录变更通知。游戏端的 `request_watch.dll` 让脚本在有新请求时才读取 JSON。预制体回收和已修改 HUD 的重新绑定分帧执行。村内移动和训练场出招的帧时间、后台开销及复测结果见[性能对照](docs/performance.md)。
+
+保存或删除文件后，监听器只更新引用发生变化的资源。给正在使用的资源换绑时，游戏可在下一帧推进已就绪的步骤。装备预览等界面暂未打开时，游戏会在对应节点就绪后通知监听器。村内水车从文件落盘到确认绑定的中位时间由 2.07 秒缩短到 1.04 秒。[保存延迟和跑图复测](docs/save-performance.md)
+
+自动监听器按 `natives/stm` 下的资源路径识别装备。以 265 女猎人手甲为例，模型和材质放在 `player/mod/f/pl265/`，与 279 使用同一套热加载流程。用 B 套覆盖同编号的 A 套后，等监听器打印这批文件的 `Replaced`，切到另一件装备再切回，或重建玩家对象，就会加载 B 套。删除覆盖后等 `Removed`，同样操作会加载该编号的 PAK 原件。监听器会等写入者关闭文件，将同一次复制中的模型、材质和依赖一起撤出旧缓存，并为当前穿戴部件预先请求成对的模型和材质。现有对象可以继续持有旧资源直到游戏换装。[279 实穿读数](docs/reentry-18.md)
+
+监听器随包识别 154,118 条原版逻辑路径，并读取 339 份原版材质模板的参数与贴图接口。删除同路径覆盖时，游戏从 PAK 读取替代资源。需要比较 GUI、PFB、USER 的原版字段，或读取未收录的模板原件时，可额外指定 `--baseline-root "<原版 natives/stm>"`。平台渲染目标保留游戏文件的完整后缀，例如 `PreviewCamera_Equip.rtex.5.stm`。
+
+监听器查找 `natives/stm` 下的松散文件。单文件保存可以刷新正在使用的组件。日志中的 `Next use` 表示已改走下次创建时重新请求资源的路径。场景中暂时停用的组件重新激活并成功换绑时会打印 `Reactivated`。
+
+修改 HUD 的 UVS 时，监听器更新实际使用它的纹理节点，保留界面的动画时间线。切换区域或重新打开界面后，已就绪的视图会使用当前图标。正在播放的特效通过 EffectPlayer 刷新。带流式高清层的纹理需要配套的 `streaming` 文件，游戏会按画面距离选择实际使用的 mip 层。
 
 | 资源 | 村内实机测试 |
 | --- | --- |
@@ -21,21 +39,23 @@ python tools/watch_outfit.py "F:\SteamLibrary\steamapps\common\MonsterHunterRise
 | `.motbank.3` | 保存 `npc018_00_bank.motbank.3` 后，村民动作组件中的活动 BankID 列表完成 `[0,10] → [0,11] → [0,10]`。已验证主动作库绑定和活动编号，尚未验证动作片段播放效果。 |
 | `.mesh.2109148288` | 修改手甲顶点后，同一 Mesh 组件换用新资源，画面出现位移。恢复后模型再次就绪。 |
 | `.tex.28` | 单独覆盖 `moon_5.tex.28`，手甲的两个使用槽同步变为洋红色，恢复后两槽再次绑定原路径的新资源。 |
-| `.mmtr.220427553` | 将 `Moon_Mask_Dissolve` 换为另一份已有的崛起版模板，约 3.2 秒完成模板及手甲、腰甲两份 MDF 的重载。恢复原模板后再次核对两个组件。依赖查找限于磁盘上有松散 MDF 的已穿戴部件。 |
+| `.rtex.5.stm` | 加工店头巾小窗实际使用 `PreviewCamera_ObjMini.rtex`。单独覆盖时预览分辨率降至 95×64，删除后恢复 680×512，头巾区域逐像素恢复。 |
+| `.mmtr.220427553` | 支持同一透明模板被多个活动 MDF 共用。监听器用松散文件或 `--baseline-root` 中的原件检查参数偏移、宽度、缓冲区大小和贴图槽。所有匹配的 MDF 就绪后在同一帧绑定。已在 279 手甲和头盔验证透明模板覆盖、恢复和中途失败回滚。 |
 | `.user.2` | 按文件差异写入头盔的 `PlayerUserDataPartsHelm` 实例。实测 `FullFace`、`HairChainStop` 和 `HairShapeData[0]` 可修改并恢复。验证的是实例字段读数。外观或模拟下次何时使用各字段，取决于游戏的消费时机。支持现有头发与脸部记录、相同数组长度及空的 `_ChainChangeList`。 |
 | `.mdf2.23` | 原路径整份材质替换。手甲的冷贴图引用与恢复结果见下节。 |
 | `.efx.2818730` | 已启动的 EffectPlayer 跨帧绑定新资源并重新播放。当前角色 `effect_player00` 的任务数和发射器数都完成 4 → 2 → 4。另测得只保存被引用的冷路径 UVS 即可触发正在播放的玩家 EFX 重载。 |
-| `.motlist.528` | 村民 `nid018` 活动库 10 的动作数完成 7 → 4 → 7。更新活动库持有的列表。已在播放的片段逐帧更新、单独保存外部 `.mot.495` 尚未验证。 |
+| `.motlist.528` | 村民 `nid018` 活动库 10 的动作数完成 7 → 4 → 7。尚未验证库内正在播放的片段如何采用新关键帧。 |
+| `.mot.495` | 独立水车动作在播放中完成末帧 239 → 119 → 239 的覆盖与删除回退。 |
 | `.rcol.20` | 通过 RequestSetCollider 的请求组绑定新资源。同一 NPC 设施碰撞文件的 42 个组全部将外圈球半径从 1.0 改为 1.25，恢复后均为 1.0。已核对运行时形状；实际接触事件、伤害判定及其他形状布局尚未验证。 |
-| `.gui.430033` | 更新已创建视图和可唯一识别的子节点的标量属性。村内 49 个 `SpeechBalloon.gui` 文字节点的 Visible 与根视图 BaseFps 完成 可见/60 → 隐藏/37 → 可见/60。结构编辑会报告跳过。 |
+| `.gui.430033` | 可以更新已创建视图和可唯一识别子节点的标量属性。结构不同的 GUI 在重建视图时重新解析。替换语音气泡后从实际新视图读到了不同的文字、纹理和纹理组节点数。 |
 | `.pfb.17` | 通过游戏预制体工厂按路径跟踪实例，更新可识别根对象的 TimeScale、DrawSelf 和 UpdateSelf，包括后续生成的实例。玩家头顶标记另有已存在实例的匹配。实测范围见冷路径对照表。 |
 | `.user.2` 固定相机 | 新增 `snow.camera.FixedCamera.FixedCameraUserData_End` 的四个插值字段。探针先持有 `roomservice_end.user` 根实例，保存后同一实例的插值时长完成 60 → 24 → 60，曲线开关完成 开 → 关 → 开。未触发客房相机过渡。 |
 
-GUI、PFB 和 USER 采用文件差异更新。默认以启动时的松散文件或运行中首次看到的文件作为基线。另可传入同一游戏补丁版本的原始资源目录 `--baseline-root "<原版 natives/stm>"`，让首次保存就能计算差异。指定 `--rsz-schema "<rszmhrise.json>"` 可启用单根标量 USER 的类型检查与实时写入。
+GUI、PFB 和 USER 在下一次创建时都读取整份资源。原地更新已有实例的兼容字段时，监听器使用启动时的松散文件或上次保存的内容计算差异。传入 `--baseline-root "<原版 natives/stm>"` 可以获得首次覆盖前的原件及包内依赖关系。指定 `--rsz-schema "<rszmhrise.json>"` 可启用单根标量 USER 的类型检查与实时写入。
 
 如果游戏启动后才第一次把某个原版资源放到 `natives/stm`，LooseFileLoader 可能已缓存该路径没有松散文件的结果。实测腰甲在这种情况下仍读到原版 4 个约束输出。在 REFramework 的 **LooseFileLoader → Debug** 取消勾选 **Enable file cache** 后再次保存，腰甲立即读到松散文件的 11 个输出。监听器在绑定单组 JCNS 前会对照磁盘和新资源的输出数量，数量不符时回滚，保留原约束层。这项检查只比较数量。
 
-材质刷新会尝试按名称恢复材质槽的启用开关。其他插件临时写入的材质参数仍可能需要重新应用。通用预制体结构重建、任意 USER 类型及 GUI 子控件树的刷新仍待实现。
+材质刷新按槽名保留启用开关。磁盘默认值相同的布尔、浮点、四分量和贴图绑定可保留运行时取值，文件中已修改的参数采用新值。实穿手甲已核对同一个槽中一个运行时四分量保持不变、另一个四分量采用新默认值。预制体和 USER 引用的结构替换结果见[同路径验收](docs/reentry-18.md)。
 
 ## 整份手甲 MDF 热加载
 
@@ -66,7 +86,7 @@ python tools/watch_arm279.py "F:\SteamLibrary\steamapps\common\MonsterHunterRise
 python tools/watch_arm279.py "F:\SteamLibrary\steamapps\common\MonsterHunterRise"
 ```
 
-看到 `Captured 12 bindings` 后可直接保存目标 MDF。监听器合并短时间内的文件变动，游戏线程通过 `via.io.file.copy` 读取原松散路径到自己的快照，解析 MDF2.23，按材质名和参数名更新手甲。按 Ctrl+C 结束监听。手动测试可用 Script Generated UI → MHRS Files HotReload 中的 Capture 和 Read MDF 按钮。重新换装或重载脚本后，在再次修改文件前重新启动监听以采集当前手甲。
+看到 `Captured 12 bindings` 后可直接保存目标 MDF。监听器合并短时间内的文件变动，游戏线程通过 `via.io.file.copy` 读取原松散路径到自己的快照，解析 MDF2.23，按材质名和参数名更新手甲。按 Ctrl+C 结束监听。重新换装或重载脚本后，在再次修改文件前重新启动监听以采集当前手甲。
 
 在已穿戴的同一只手甲上，`moon_RimColor` 的测试值覆盖了六个槽，延迟 8.61 秒读回仍为 (1, 0, 1, 1)。另一次仅保存文件的测试中，监听器约 0.25 秒后收到更新回执，六个槽采用新值；恢复原文件后，六槽及原 MDF 哈希均恢复。两个实验都沿用原 Mesh。当前另一个探测参数 `S_col_R` 在后续采样时回到了原有运行时值，其覆盖来源待定位。该颜色模式仅处理上述参数。
 
@@ -108,5 +128,5 @@ python tools/watch_arm279.py "F:\SteamLibrary\steamapps\common\MonsterHunterRise
 
 ## 致谢
 
-- 感谢 [AleksKavil / MHWS-Files-HotReload](https://github.com/AleksKavil/MHWS-Files-HotReload)（Stellar）。荒野版对松散资源变更、引擎缓存与当前场景引用的处理，为崛起版的实验设计提供了参考。当前 Lua 原型和测试工具独立编写。[参考版本 e3ef3e0](https://github.com/AleksKavil/MHWS-Files-HotReload/tree/e3ef3e067bfed2da5c1a1adac79c55fe1dbaaa08)
+- 感谢 Stellar（GitHub 用户 AleksKavil）公开荒野版热加载工具。崛起版参考了它监听目录变更、追踪资源依赖、暂存旧缓存条目并按原路径重载的做法。等待材质和贴图就绪后再刷新当前 Mesh，以及按文件差异保留运行时材质参数，也借鉴了荒野版。参考版本为 `e3ef3e0`，安装包内保留了上游署名和 MIT 许可原文。[荒野版参考源码](https://github.com/AleksKavil/MHWS-Files-HotReload/tree/e3ef3e067bfed2da5c1a1adac79c55fe1dbaaa08) · [随包第三方署名](reframework/data/MHRS-Files-HotReload/THIRD_PARTY_NOTICES.md)
 - 感谢 [praydog / REFramework](https://github.com/praydog/REFramework) 提供游戏内脚本运行环境、资源 API 和对象反射接口。

@@ -61,7 +61,15 @@ def replace(path, data):
     try:
         with tmp.open("xb") as f:
             f.write(data)
-        os.replace(tmp, path)
+        # The game's frame callback can have the destination open briefly.
+        for attempt in range(12):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError as error:
+                if error.winerror not in (5, 32, 33) or attempt == 11:
+                    raise
+                time.sleep(.025)
     finally:
         tmp.unlink(missing_ok=True)
 

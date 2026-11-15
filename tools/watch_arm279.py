@@ -1,5 +1,6 @@
 """Watch the Rise arm MDF and request a refresh after a stable save."""
 import argparse
+import errno
 import json
 import msvcrt
 import sys
@@ -9,6 +10,8 @@ from pathlib import Path
 
 # Embedded Python on the modding workstation omits the script's directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from file_changes import DirectoryChanges
+from material_layout import MaterialValidator, materials
 from test_arm279 import LOGICAL, replace
 
 
@@ -17,7 +20,17 @@ def command(channel, action, **payload):
     # acknowledgement when a test observer and the watcher run concurrently.
     with (channel / "channel.lock").open("a+b") as lock:
         lock.seek(0)
-        msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        # The CRT's blocking lock retries only once a second. Keep its timeout
+        # while letting simultaneous watcher and observer requests hand off promptly.
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(.015)
         try:
             return exchange(channel, action, payload)
         finally:
@@ -27,19 +40,43 @@ def command(channel, action, **payload):
 
 def exchange(channel, action, payload):
     key = uuid.uuid4().hex
-    replace(channel / "request.json", json.dumps({"id": key, "action": action, **payload}).encode())
-    deadline = time.monotonic() + 8
-    while time.monotonic() < deadline:
-        time.sleep(0.1)
-        try:
-            reply = json.loads((channel / "status.json").read_bytes())
-        except (FileNotFoundError, PermissionError, json.JSONDecodeError):
-            continue
-        if reply.get("id") == key:
-            if not reply["ok"]:
-                raise RuntimeError(reply["result"])
-            return reply["result"]
-    raise TimeoutError(f"No game response to {action}")
+    status = channel / "status.json"
+    try:
+        changes = DirectoryChanges(channel, recursive=False)
+    except OSError:
+        changes = None
+    try:
+        # Arm before publishing. Keep the periodic reconciliation for partial
+        # writes and filesystems where directory notifications are unavailable.
+        replace(channel / "request.json", json.dumps({"id": key, "action": action, **payload}).encode())
+        deadline = time.monotonic() + 8
+        next_read = time.monotonic() + .1
+        while time.monotonic() < deadline:
+            timeout = max(0, min(deadline, next_read) - time.monotonic())
+            if changes:
+                try:
+                    paths, _, overflow = changes.poll(timeout)
+                except OSError:
+                    changes.close()
+                    changes = None
+                    continue
+                if not overflow and status not in paths and time.monotonic() < next_read:
+                    continue
+            else:
+                time.sleep(timeout)
+            next_read = time.monotonic() + .1
+            try:
+                reply = json.loads(status.read_bytes())
+            except (FileNotFoundError, PermissionError, UnicodeError, json.JSONDecodeError):
+                continue
+            if reply.get("id") == key:
+                if not reply["ok"]:
+                    raise RuntimeError(reply["result"])
+                return reply["result"]
+        raise TimeoutError(f"No game response to {action}")
+    finally:
+        if changes:
+            changes.close()
 
 
 def signature(path):
@@ -64,11 +101,18 @@ def reload_native(channel):
         raise
 
 
-def watch(game, native=False):
+def watch(game, native=False, baseline_root=None):
     target = game / "natives/stm" / (LOGICAL + ".23")
     channel = game / "reframework/data/MHRS-Files-HotReload"
-    observed = signature(target)
+    observed = signature(target) if target.exists() else None
+    previous = {}
+    validator = MaterialValidator(game / "natives/stm", baseline_root)
     if native:
+        if target.exists():
+            try:
+                previous = {m.name: m.template.lower() for m in materials(target.read_bytes())}
+            except ValueError:
+                pass
         print("Watching whole MDF", target, flush=True)
     else:
         print("Captured", command(channel, "capture")["bindings"], "bindings; watching", target, flush=True)
@@ -83,15 +127,27 @@ def watch(game, native=False):
                 observed = current
                 continue
             if native:
+                updated = validator.validate(target, previous)
                 result, _ = reload_native(channel)
+                previous = updated
                 print("Bound MDF", result["resource"], flush=True)
             else:
                 reply = command(channel, "refresh")
                 print("Updated", reply["changed"], "values", flush=True)
             applied = current
-        except (FileNotFoundError, PermissionError):
+        except FileNotFoundError:
+            if observed is not None and not target.exists():
+                if native:
+                    try:
+                        command(channel, "asset_removed", paths=[LOGICAL])
+                    except (RuntimeError, TimeoutError, OSError) as error:
+                        print("Removal pending", error, flush=True)
+                        continue
+                observed = applied = None
+                print("Removed", LOGICAL, flush=True)
+        except PermissionError:
             continue
-        except (RuntimeError, TimeoutError) as error:
+        except (ValueError, RuntimeError, TimeoutError) as error:
             # Wait for the next save after an invalid file. Keep the live values.
             print(error, flush=True)
             applied = observed
@@ -101,8 +157,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("game", type=Path)
     parser.add_argument("--native", action="store_true", help="Reload the complete MDF with the Rise 16.0.2.0 module")
+    parser.add_argument("--baseline-root", type=Path, help="Patch-matched extracted natives/stm for template validation")
     try:
         args = parser.parse_args()
-        watch(args.game, args.native)
+        watch(args.game, args.native, args.baseline_root)
     except KeyboardInterrupt:
         pass

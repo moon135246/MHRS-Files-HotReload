@@ -14,7 +14,7 @@ local kinds = {
     uvar={"via.motion.Motion","via.userdata.UserVariablesResource","get_UserVariables","set_UserVariables"},
     fbxskel={"via.motion.CustomSkeleton","via.motion.FbxSkeletonResource","get_SkeletonResourceHandle","set_SkeletonResourceHandle"},
     tex={"via.render.Mesh","via.render.TextureResource"},
-    mdf2={"via.render.Mesh","via.render.MeshMaterialResource","get_Material","set_Material"},
+    mdf2={"via.render.Mesh","via.render.MeshMaterialResource","get_Material","set_Material(via.render.MeshMaterialResourceHolder)"},
     user={"snow.player.PlayerMaterialParts"}
 }
 
@@ -23,9 +23,10 @@ local function parts(class)
     local player=manager and manager:call("findMasterPlayer")
     assert(player,"Local hunter unavailable")
     local list={}
+    local component_type=sdk.typeof(class)
     local function visit(t)
         local go=t:call("get_GameObject")
-        local comp=go:call("getComponent(System.Type)",sdk.typeof(class))
+        local comp=go:call("getComponent(System.Type)",component_type)
         if comp then list[#list+1]=comp end
         local child=t:call("get_Child")
         while child do visit(child); child=child:call("get_Next") end
@@ -35,55 +36,96 @@ local function parts(class)
 end
 
 local function holder(b)
+    if b.preview then return b.preview:call("get_Item",b.index) end
     if b.i then return b.comp:call("getMaterialTexture",b.i,b.j) end
     local owner=b.element or b.layer or b.bank or b.group or b.comp
     return owner:call(b.kind[3])
 end
 
 local function assign(b,h)
-    if b.i then b.comp:call("setMaterialTexture",b.i,b.j,h)
+    if b.preview then b.preview:call("set_Item",b.index,h)
+    elseif b.i then b.comp:call("setMaterialTexture",b.i,b.j,h)
     else
         local owner=b.element or b.layer or b.bank or b.group or b.comp
         owner:call(b.kind[4],h)
     end
 end
 
-local function scene_components(class)
+local function array_elements(objects,label)
+    if not objects then return {} end
+    if type(objects)=="table" then return objects end
+    if objects.get_elements then return objects:get_elements() end
+    -- A typed array may arrive as an ordinary managed object. Snapshot it in
+    -- the same callback as the query; the engine can reuse it on later frames.
+    local td=objects:get_type_definition()
+    local get=td:is_a("System.Array") and td:get_method("Get(System.Int32)")
+    assert(get,"Unable to enumerate "..label)
+    local result={}
+    for i=0,objects:call("get_Length")-1 do
+        local element=get:call(objects,i)
+        if element then result[#result+1]=element end
+    end
+    return result
+end
+
+local function scene_components(class,cache)
+    if cache and cache[class] then return cache[class] end
     local scene=sdk.call_native_func(sdk.get_native_singleton("via.SceneManager"),
         sdk.find_type_definition("via.SceneManager"),"get_CurrentScene")
     assert(scene,"Current scene unavailable")
-    local components=scene:call("findComponents(System.Type)",sdk.typeof(class))
-    return type(components)=="table" and components or (components and components:get_elements() or {})
+    local component_type=sdk.typeof(class)
+    local components=array_elements(scene:call("findComponents(System.Type)",component_type),class)
+    if cache then cache[class]=components end
+    return components
 end
 
-local function bindings(path,kind,ext)
+local function gui_textures(comp,visit)
+    for _,class in ipairs({"via.gui.Texture","via.gui.TextureSet"}) do
+        local class_type=sdk.typeof(class)
+        local objects=array_elements(comp:call("findObjects(System.Type)",class_type),class)
+        for _,obj in ipairs(objects) do visit(obj) end
+    end
+end
+
+local function bindings(path,kind,ext,include_dormant,cache)
     local found={}
+    local wanted=type(path)=="table" and path or {[path:lower()]=true}
     local function consider(b)
         local h=holder(b)
         local p=h and h:call("get_ResourcePath")
-        if p and p:lower()==path:lower() then
+        if p and wanted[p:lower()] then
             b.old=h
             b.path=p
+            if ext=="rtex" then b.slot_key=tostring(b.comp:get_address()).."/"..tostring(b.index) end
+            if ext=="uvs" then b.slot_key=b.element:get_address() end
             found[#found+1]=b
         end
     end
-    local components=scene_components(kind[1])
-    local visited={}
-    for _,comp in ipairs(components) do
-        if not comp:call("get_GameObject"):call("get_Update") then
-            -- A dormant NPC has no running simulation to refresh.
-        elseif ext=="uvs" then
-            if comp:call("get_Ready") then
-                for _,class in ipairs({"via.gui.Texture","via.gui.TextureSet"}) do
-                    local objects=comp:call("findObjects(System.Type)",sdk.typeof(class))
-                    local elements=type(objects)=="table" and objects or (objects and objects:get_elements() or {})
-                    for _,obj in ipairs(elements) do
-                        if not visited[obj:get_address()] then
-                            visited[obj:get_address()]=true
-                            consider({comp=comp,element=obj,kind=kind})
-                        end
-                    end
+    if ext=="rtex" then
+        local manager=sdk.get_managed_singleton("snow.gui.GuiManager")
+        local list=manager and manager:get_field("previewTextureList")
+        for i=0,(list and list:call("get_Count") or 0)-1 do
+            consider({comp=manager,preview=list,index=i,kind=kind})
+        end
+        for _,class in ipairs({"via.render.RenderOutput","via.render.RenderTargetOperator"}) do
+            for _,comp in ipairs(scene_components(class,cache)) do
+                if include_dormant or comp:call("get_GameObject"):call("get_Update") then
+                    consider({comp=comp,kind=kind})
                 end
+            end
+        end
+    end
+    local components=scene_components(kind[1],cache)
+    local visited={}
+    local function inspect(comp)
+        if ext=="uvs" then
+            if comp:call("get_Ready") then
+                gui_textures(comp,function(obj)
+                    if not visited[obj:get_address()] then
+                        visited[obj:get_address()]=true
+                        consider({comp=comp,element=obj,kind=kind})
+                    end
+                end)
             end
         elseif ext=="tex" then
             if comp:call("get_MaterialReady") then
@@ -118,13 +160,20 @@ local function bindings(path,kind,ext)
             consider({comp=comp,kind=kind,restart=(state==1 or state==2) and not comp:call("get_Paused")})
         else consider({comp=comp,kind=kind}) end
     end
+    for _,comp in ipairs(components) do
+        local ok,go=pcall(comp.call,comp,"get_GameObject")
+        if ok and go then
+            if go:call("get_Update") then inspect(comp)
+            elseif include_dormant then pcall(inspect,comp) end
+        end
+    end
     return found
 end
 
 local function binding_report(list,ext)
     local result={}
     for _,b in ipairs(list) do
-        local r={object=b.comp:call("get_GameObject"):call("get_Name"),path=b.path,
+        local r={object=b.preview and "GuiManager.previewTextureList" or b.comp:call("get_GameObject"):call("get_Name"),path=b.path,
             component=tostring(b.comp:get_address()),resource=tostring(holder(b):read_qword(0x10))}
         if ext=="chain" then r.groups=b.comp:call("getGroupCount");r.resource_groups=b.comp:call("get_ResourceGroupCount") end
         if b.layer then
@@ -133,6 +182,16 @@ local function binding_report(list,ext)
             else r.targets=b.layer:call("get_OutputTargetCount") end
         end
         if ext=="mesh" then r.ready=b.comp:call("get_MeshReady");r.lods=b.comp:call("get_LodCount") end
+        if ext=="mesh" or ext=="mdf2" then
+            local model=b.comp:call("getMesh")
+            r.mesh_path=model and model:call("get_ResourcePath")
+            r.material_names={}
+            if b.comp:call("get_MaterialReady") then
+                for i=0,b.comp:call("get_MaterialNum")-1 do
+                    r.material_names[#r.material_names+1]=b.comp:call("getMaterialName",i)
+                end
+            end
+        end
         if ext=="motbank" then
             local banks={}
             for i=0,b.comp:call("getActiveMotionBankCount")-1 do
@@ -168,22 +227,110 @@ local function binding_report(list,ext)
     return result
 end
 
-local function switches(mesh)
+local variable_access={
+    [0]={"getMaterialBool","setMaterialBool"},
+    [1]={"getMaterialFloat","setMaterialFloat"},
+    [4]={"getMaterialFloat4","setMaterialFloat4"},
+}
+
+local function material_state(mesh,policy)
     local result={}
     for i=0,mesh:call("get_MaterialNum")-1 do
-        result[mesh:call("getMaterialName",i)]=mesh:call("getMaterialsEnable",i)
+        local name=mesh:call("getMaterialName",i)
+        local slot={enabled=mesh:call("getMaterialsEnable",i),variables={},textures={}}
+        result[name]=slot
+        local keep=policy==true or (policy and policy[name])
+        if keep then
+            for j=0,mesh:call("getMaterialVariableNum",i)-1 do
+                local key=mesh:call("getMaterialVariableName",i,j)
+                local kind=mesh:call("getMaterialVariableType",i,j)
+                if variable_access[kind] and (keep==true or keep.variables[key]) then
+                    local value=mesh:call(variable_access[kind][1],i,j)
+                    if kind==4 then value=Vector4f.new(value.x,value.y,value.z,value.w) end
+                    slot.variables[key]={kind=kind,value=value}
+                end
+            end
+            for j=0,mesh:call("getMaterialTextureNum",i)-1 do
+                local key=mesh:call("getMaterialTextureName",i,j)
+                if keep==true or keep.textures[key] then
+                    slot.textures[key]={holder=mesh:call("getMaterialTexture",i,j)}
+                end
+            end
+        end
     end
     return result
 end
 
-local function restore_switches(mesh,prior)
+local function restore_material(mesh,prior)
     for i=0,mesh:call("get_MaterialNum")-1 do
-        local enabled=prior[mesh:call("getMaterialName",i)]
-        if enabled~=nil and enabled~=mesh:call("getMaterialsEnable",i) then
-            mesh:call("setMaterialsEnable",i,enabled)
+        local slot=prior[mesh:call("getMaterialName",i)]
+        if slot then
+            if slot.enabled~=mesh:call("getMaterialsEnable",i) then mesh:call("setMaterialsEnable",i,slot.enabled) end
+            for j=0,mesh:call("getMaterialVariableNum",i)-1 do
+                local saved=slot.variables[mesh:call("getMaterialVariableName",i,j)]
+                if saved and saved.kind==mesh:call("getMaterialVariableType",i,j) then
+                    mesh:call(variable_access[saved.kind][2],i,j,saved.value)
+                end
+            end
+            for j=0,mesh:call("getMaterialTextureNum",i)-1 do
+                local saved=slot.textures[mesh:call("getMaterialTextureName",i,j)]
+                if saved then
+                    local current=mesh:call("getMaterialTexture",i,j)
+                    local old_path=saved.holder and saved.holder:call("get_ResourcePath")
+                    local new_path=current and current:call("get_ResourcePath")
+                    if (old_path and old_path:lower())~=(new_path and new_path:lower()) then
+                        mesh:call("setMaterialTexture",i,j,saved.holder)
+                    end
+                end
+            end
         end
     end
 end
+
+local deferred_materials={}
+local retired_visuals={}
+local function current_geometry(comp)
+    local key=comp:get_address()
+    local prior=retired_visuals[key]
+    if not prior then return true end
+    for _,ext in ipairs({"mesh","mdf2"}) do
+        if prior[ext] then
+            local h=comp:call(kinds[ext][3])
+            if h and tostring(h:read_qword(0x10))==prior[ext] then return false end
+        end
+    end
+    retired_visuals[key]=nil
+    return true
+end
+local function restore_when_ready(b)
+    if not b.switches then return end
+    local id=b.comp:get_address()
+    deferred_materials[id]=nil
+    if b.comp:call("get_MaterialReady") then
+        restore_material(b.comp,b.switches)
+    else
+        local h=holder(b)
+        if h then
+            deferred_materials[id]={mesh=b.comp,go=b.comp:call("get_GameObject"),
+                resource=h:read_qword(0x10),values=b.switches}
+        end
+    end
+end
+re.on_application_entry("UpdateBehavior",function()
+    for id,entry in pairs(deferred_materials) do
+        local ok,finished=pcall(function()
+            if not entry.go:call("get_Valid") then return true end
+            local h=entry.mesh:call("get_Material")
+            if not h or h:read_qword(0x10)~=entry.resource then return true end
+            if entry.mesh:call("get_MaterialReady") then
+                restore_material(entry.mesh,entry.values)
+                return true
+            end
+        end)
+        if not ok then log.error("[MHRS-Files-HotReload] "..tostring(finished)) end
+        if not ok or finished then deferred_materials[id]=nil end
+    end
+end)
 
 local function user_field(root,edit)
     local target
@@ -317,6 +464,42 @@ local function player_marker(path,edits,apply)
 end
 -- Keep path provenance from the engine's prefab factory for otherwise identical instances.
 local prefab_instances,prefab_values={},{}
+local prefab_generations={}
+local tracked={}
+local function track_instance(map,address,entry)
+    entry.map,entry.address=map,address
+    map[address]=entry
+    tracked[#tracked+1]=entry
+end
+-- Keep a factory reachable while its instance is alive. Other observed
+-- factories are weak so tracking does not keep inactive scene assets loaded.
+local prefab_factories=setmetatable({},{__mode="v"})
+local function track_factory(prefab)
+    local name=prefab and prefab:call("get_ResourcePath")
+    if name and name~="" then prefab_factories[prefab:get_address()]=prefab end
+    return name
+end
+local function pin_prefab_instances(wanted)
+    local groups={}
+    for _,entry in pairs(prefab_instances) do
+        if wanted[entry.path] and not entry.generation and entry.go:call("get_Valid") then
+            local factory=entry.factory
+            if factory and factory:call("get_Valid") and factory:call("get_Ready") then
+                local name=factory:call("get_ResourcePath")
+                local group=groups[name]
+                if name and not group then
+                    local res=sdk.create_resource("via.PrefabResource",name)
+                    if res then
+                        group={resource=res,count=0}
+                        groups[name]=group
+                        prefab_generations[group]=true
+                    end
+                end
+                if group then group.count=group.count+1;entry.generation=group end
+            end
+        end
+    end
+end
 local prefab_keys={DrawSelf=true,UpdateSelf=true,TimeScale=true}
 local marker_path="gui/01_common/prefab/pl_headmessage.pfb"
 local function apply_prefab(go,edits)
@@ -342,8 +525,7 @@ local function update_prefab(path,edits)
     path=path:lower()
     local targets={}
     for address,entry in pairs(prefab_instances) do
-        if not entry.go:call("get_Valid") then prefab_instances[address]=nil
-        elseif entry.path==path then targets[address]=entry.go end
+        if entry.path==path and entry.go:call("get_Valid") then targets[address]=entry.go end
     end
     if path==marker_path then
         for _,gui in ipairs(scene_components("via.gui.GUI")) do
@@ -374,14 +556,27 @@ end
 for _,method in ipairs(sdk.find_type_definition("via.Prefab"):get_methods()) do
     if method:get_name()=="instantiate" then
         sdk.hook(method,function(args)
-            local prefab=sdk.to_managed_object(args[2])
-            thread.get_hook_storage().prefab_path=prefab and prefab:call("get_ResourcePath")
+            local storage=thread.get_hook_storage()
+            storage.prefab_path=nil
+            storage.factory=nil
+            local ok,prefab=pcall(sdk.to_managed_object,args[2])
+            if not ok or not prefab or prefab:get_type_definition():get_full_name()~="via.Prefab" then return end
+            storage.prefab_path=track_factory(prefab)
+            storage.factory=prefab
         end,function(retval)
-            local path=thread.get_hook_storage().prefab_path
+            local storage=thread.get_hook_storage()
+            local path=storage.prefab_path
+            if not path or path=="" then return retval end
             local go=sdk.to_managed_object(retval)
             if path and path~="" and go then
                 path=path:lower()
-                prefab_instances[go:get_address()]={go=go,path=path}
+                local address=go:get_address()
+                local entry=prefab_instances[address]
+                if not entry or entry.go~=go or entry.path~=path then
+                    track_instance(prefab_instances,address,{go=go,path=path,factory=storage.factory})
+                else
+                    entry.factory=storage.factory
+                end
                 if prefab_values[path] then
                     local ok,err=pcall(apply_prefab,go,prefab_values[path])
                     if not ok then log.error("[MHRS-Files-HotReload] "..tostring(err)) end
@@ -391,13 +586,32 @@ for _,method in ipairs(sdk.find_type_definition("via.Prefab"):get_methods()) do
         end)
     end
 end
-local last_prefab_cleanup=0
+-- Walk backwards so deleting by swapping the last slot is constant time. Entries
+-- added during a pass are picked up on the next pass. Pinned old roots stay
+-- tracked even if a new instance has since claimed the same map entry.
+local next_cleanup,cleanup_cursor=0,0
 re.on_application_entry("UpdateBehavior",function()
-    if os.clock()-last_prefab_cleanup<5 then return end
-    last_prefab_cleanup=os.clock()
-    for address,entry in pairs(prefab_instances) do
-        if not entry.go:call("get_Valid") then prefab_instances[address]=nil end
+    if cleanup_cursor==0 then
+        if #tracked==0 or os.clock()<next_cleanup then return end
+        cleanup_cursor=#tracked
     end
+    for _=1,math.min(cleanup_cursor,8) do
+        local i=cleanup_cursor
+        cleanup_cursor=i-1
+        local entry=tracked[i]
+        local current=entry.map[entry.address]==entry
+        if (not current and not entry.generation) or not entry.go:call("get_Valid") then
+            if current then entry.map[entry.address]=nil end
+            local group=entry.generation
+            if group then
+                group.count=group.count-1
+                if group.count==0 then group.resource:release();prefab_generations[group]=nil end
+            end
+            tracked[i]=tracked[#tracked]
+            tracked[#tracked]=nil
+        end
+    end
+    if cleanup_cursor==0 then next_cleanup=os.clock()+5 end
 end)
 
 local view_fields={BaseFps=true,Priority=true,Visible=true,HitVisible=true,Overlay=true,DepthTest=true,
@@ -422,7 +636,7 @@ local function gui_views(path,edits,apply)
                         assert(class:match("^via%.gui%.[%w_]+$"),"Invalid GUI class")
                         if not elements[class] then
                             local all=c:call("findObjects(System.Type)",sdk.typeof(class))
-                            elements[class]=type(all)=="table" and all or (all and all:get_elements() or {})
+                            elements[class]=array_elements(all,class)
                         end
                         targets={}
                         for _,el in ipairs(elements[class]) do
@@ -465,12 +679,461 @@ local function gui_views(path,edits,apply)
     end
     return {views=#values,bindings=values}
 end
+local function finish_materials(group,commit,native)
+    if not commit then
+        local state=native("abort_materials")
+        assert(state=="rolled back",state)
+        return state
+    end
+    local touched={}
+    local ok,state=pcall(function()
+        -- Re-enumerate after async loading. A changed preview or newly equipped
+        -- part must invalidate the whole group before any mesh setter runs.
+        for _,owner in ipairs(group.owners) do
+            owner.list=bindings(owner.path,kinds.mdf2,"mdf2")
+            assert(#owner.list==owner.count,"MDF users changed during template reload")
+            local resource=assert(sdk.create_resource(kinds.mdf2[2],owner.path))
+            local address=tostring(resource:get_address())
+            local h=resource:create_holder(kinds.mdf2[2].."Holder")
+            resource:release()
+            assert(h and address==owner.fresh and tostring(h:read_qword(0x10))==owner.fresh,"Staged MDF cache mismatch")
+            owner.holder=h
+            for _,b in ipairs(owner.list) do
+                assert(current_geometry(b.comp),"Previous equipment generation is still attached")
+                local expected=owner.slots[b.comp:get_address()]
+                assert(expected==b.old:read_qword(0x10),"MDF holder changed during template reload")
+                if b.comp:call("get_MaterialReady") then b.switches=material_state(b.comp,true) end
+            end
+        end
+        for _,owner in ipairs(group.owners) do
+            for _,b in ipairs(owner.list) do
+                touched[#touched+1]=b
+                assign(b,owner.holder)
+                assert(tostring(holder(b):read_qword(0x10))==owner.fresh,"MDF holder readback failed")
+                restore_when_ready(b)
+            end
+        end
+        local result=native("commit_materials")
+        assert(result=="committed",result)
+        return result
+    end)
+    if not ok then
+        local rollback_error
+        for i=#touched,1,-1 do
+            local b=touched[i]
+            local restored,err=pcall(function()
+                assign(b,b.old)
+                restore_when_ready(b)
+            end)
+            if not restored then rollback_error=err end
+        end
+        error(rollback_error and (tostring(state).."; rollback: "..tostring(rollback_error)) or state)
+    end
+    return state
+end
+
 function M.active() return job~=nil or master~=nil end
+local sleeping={}
+local warming={}
+local equipment_refs={}
+local equipment_pending=false
+local gui_sequences,gui_assets={},{}
+local next_gui_check,gui_scan=0,nil
+local check_preview_targets=true
+local texture_classes={"via.gui.Texture","via.gui.TextureSet"}
+local waiting_uvs,seen_uvs,waiting_gui_assets={},{},{}
+local watch_expires,next_broad_check=0,0
+local gui_notice="MHRS-Files-HotReload/gui-ready.json"
+local notify_ready=false
+-- A watcher with a pending view can re-register immediately after a script reset.
+json.dump_file(gui_notice,{state="loaded"})
+
+-- Opening a preview can restore the camera prefab's original RTEX even when
+-- GuiManager and the menu's UV sequence already use a newer generation.
+local function repair_preview_camera(camera,slots)
+    if not camera:call("get_IsReady") then return end
+    local go=camera:call("get_GameObject")
+    if not go or not go:call("get_Valid") or not go:call("get_Update") then return end
+    local index=camera:get_field("_NowTextureType")
+    if index<0 or index>=slots:call("get_Count") then return end
+    local slot=slots:call("get_Item",index)
+    local path=slot and slot:call("get_ResourcePath")
+    if not path or slot:read_qword(0x10)==0 then return end
+    for _,field in ipairs({"_RefRenderOutput","_RefRenderTargetOperator"}) do
+        local comp=camera:get_field(field)
+        local bound=comp and comp:call("get_RenderTarget")
+        local old_path=bound and bound:call("get_ResourcePath")
+        if old_path and old_path:lower()==path:lower() and bound:read_qword(0x10)~=slot:read_qword(0x10) then
+            comp:call("set_RenderTarget",slot)
+        end
+    end
+end
+
+local function repair_preview_targets()
+    local manager=sdk.get_managed_singleton("snow.gui.GuiManager")
+    local slots=manager and manager:get_field("previewTextureList")
+    if not slots then return end
+    local cameras=scene_components("snow.camera.PreviewCamera")
+    for _,camera in ipairs(cameras) do pcall(repair_preview_camera,camera,slots) end
+end
+
+local preview_setup=sdk.find_type_definition("snow.camera.PreviewCamera"):get_method("SetRenderTargetTexture")
+sdk.hook(preview_setup,nil,function(retval)
+    check_preview_targets=true
+    return retval
+end)
+
+local function update_gui_assets()
+    gui_assets={}
+    for _,sequence in pairs(gui_sequences) do
+        for name in pairs(sequence.owners) do gui_assets[name]=true end
+    end
+end
+
+-- Views can survive a scene change or be created later from the same cached
+-- GUI definition. Only keep the latest holder and visit ready, active views.
+local function remember_gui_sequence(job,list,h)
+    local owners={}
+    for _,name in ipairs(job.gui_owners or {}) do owners[name:lower()]=true end
+    for _,b in ipairs(list) do
+        local ok,name=pcall(function()
+            local asset=b.comp:call("get_Asset")
+            return asset and asset:call("get_ResourcePath")
+        end)
+        if ok and name then owners[name:lower()]=true end
+    end
+    if next(owners) then
+        gui_sequences[job.path:lower()]={holder=h,address=job.fresh,owners=owners}
+        update_gui_assets()
+    end
+end
+
+local function relevant_gui(comp,broad)
+    local asset=comp:call("get_Asset")
+    local name=asset and asset:call("get_ResourcePath")
+    if not name then return false end
+    name=name:lower()
+    if not (gui_assets[name] or waiting_gui_assets[name] or broad) or not comp:call("get_Ready") then return false end
+    local go=comp:call("get_GameObject")
+    return go and go:call("get_Valid") and go:call("get_Update")
+end
+
+local function active_gui_at(components,index,broad)
+    local comp=components[index]
+    if comp and relevant_gui(comp,broad) then return comp end
+end
+
+local function repair_gui_item(objects,index)
+    -- Both indexing a closed window's collection and calling its item can fail.
+    local obj=objects[index]
+    local old=obj:call("get_UVSequence")
+    local name=old and old:call("get_ResourcePath")
+    if not name then return end
+    local path=name:lower()
+    if waiting_uvs[path] and not seen_uvs[path] then
+        local first=not next(seen_uvs)
+        seen_uvs[path]=true
+        if first and notify_ready then json.dump_file(gui_notice,{state="ready",path=path}) end
+    end
+    local saved=gui_sequences[path]
+    if saved and tostring(old:read_qword(0x10))~=saved.address then
+        obj:call("set_UVSequence",saved.holder)
+    end
+end
+
+-- Enumerate once per pass. Spread ready views, their two object queries and
+-- individual UV bindings across frames, including on an unchanged HUD.
+re.on_application_entry("UpdateBehavior",function()
+    if M.active() then gui_scan=nil;return end
+    if check_preview_targets then
+        check_preview_targets=false
+        pcall(repair_preview_targets)
+    end
+    if next(waiting_uvs) and os.clock()>watch_expires then waiting_uvs,seen_uvs,waiting_gui_assets={},{},{} end
+    if not next(gui_sequences) and not next(waiting_uvs) then gui_scan=nil;return end
+    if not gui_scan then
+        if os.clock()<next_gui_check then return end
+        local ok,components=pcall(scene_components,kinds.uvs[1])
+        next_gui_check=os.clock()+1
+        if ok then
+            local broad=next(waiting_uvs) and os.clock()>=next_broad_check
+            if broad then next_broad_check=os.clock()+10 end
+            gui_scan={components=components,count=#components,index=1,broad=broad}
+        end
+        return
+    end
+    local scan=gui_scan
+    if scan.comp then
+        local valid,ready=pcall(relevant_gui,scan.comp,scan.broad)
+        if not valid or not ready then scan.comp,scan.objects=nil,nil;return end
+        if not scan.objects then
+            local class=texture_classes[scan.class]
+            local ok,objects=pcall(function()
+                return array_elements(scan.comp:call("findObjects(System.Type)",sdk.typeof(class)),class)
+            end)
+            if not ok then scan.comp=nil;return end
+            scan.objects,scan.item,scan.item_count=objects,1,#objects
+        end
+        for i=scan.item,math.min(scan.item_count,scan.item+23) do
+            scan.item=i+1
+            pcall(repair_gui_item,scan.objects,i)
+        end
+        if scan.item>scan.item_count then
+            scan.objects=nil
+            scan.class=scan.class+1
+            if not texture_classes[scan.class] then scan.comp=nil end
+        end
+        return
+    end
+    for i=scan.index,math.min(scan.count,scan.index+7) do
+        scan.index=i+1
+        local ok,comp=pcall(active_gui_at,scan.components,i,scan.broad)
+        if ok and comp then scan.comp,scan.class=comp,1;return end
+    end
+    if scan.index>scan.count then gui_scan=nil;next_gui_check=os.clock()+1 end
+end)
+
+local function release_equipment()
+    for _,resource in pairs(equipment_refs) do resource:release() end
+    equipment_refs={}
+    equipment_pending=false
+end
+
+local function equipment_factories(wanted,visit)
+    local parts={}
+    local names={arm="Arm",body="Body",helm="Helm",leg="Leg",wst="Wst"}
+    for path in pairs(wanted) do
+        local part=path:match("^player/prefab/mod/[fm]/pl%d+/[fm]_(%a+)%d+%.pfb$")
+        if names[part] then parts[names[part]]=true end
+    end
+    if not next(parts) then return end
+    local pm=sdk.get_managed_singleton("snow.player.PlayerManager")
+    if not pm or not pm:call("findMasterPlayer") then return end
+    local player=pm:call("get_PlayerParam")[pm:call("getMasterPlayerID")]
+    if not player then return end
+    local enum=sdk.find_type_definition("snow.player.PlayerRequestEquipsData.EquipPack")
+    for part in pairs(parts) do
+        local field=enum:get_field(part)
+        if field then
+            local prefabs=pm:call("getPartsPrefabList",field:get_data(nil),pm:call("getPlayerWeaponType",player),
+                pm:call("getPlayerSexType",player),false)
+            if prefabs then
+                for i=0,prefabs:call("get_Count")-1 do visit(prefabs:call("get_Item",i)) end
+            end
+        end
+    end
+end
+local function awakened(done)
+    local ready={}
+    for path,entries in pairs(sleeping) do
+        for i=#entries,1,-1 do
+            local b=entries[i]
+            local ok,state=pcall(function()
+                if not b.go:call("get_Valid") then return "drop" end
+                if not b.go:call("get_Update") then return "sleep" end
+                if done[path] then return "drop" end
+                local h=holder(b)
+                if h and h:call("get_ResourcePath"):lower()==path and
+                        tostring(h:read_qword(0x10))==b.address then return "awake" end
+                return "drop"
+            end)
+            if not ok or state=="drop" then table.remove(entries,i)
+            elseif state=="awake" then ready[path]=true end
+        end
+        if #entries==0 then sleeping[path]=nil end
+    end
+    return {paths=ready,pending=next(sleeping)~=nil}
+end
 function M.reset(native)
     if job then M.run("asset_abort",{},native) end
     while master do M.run("asset_master_abort",{},native) end
+    release_equipment()
+    gui_scan=nil
+    for group in pairs(prefab_generations) do group.resource:release() end
+    prefab_generations={}
+    tracked,prefab_instances,retired_visuals={},{},{}
+    cleanup_cursor=0
 end
 function M.run(action,req,native)
+    if action=="asset_gui_ready" then
+        local wanted,found,assets={},{},{}
+        for path,names in pairs(req.owners) do
+            path=path:lower()
+            if seen_uvs[path] then found[#found+1]=path else
+                wanted[path]=true
+                for _,name in ipairs(names) do assets[name:lower()]=true end
+            end
+        end
+        waiting_uvs,seen_uvs,waiting_gui_assets=wanted,{},assets
+        notify_ready=req.notify==true
+        watch_expires=os.clock()+(notify_ready and 120 or 5)
+        return {paths=found,notifications=notify_ready}
+    end
+    if action=="asset_awake" then return awakened(req.done or {}) end
+    if action=="asset_factories_ready" then
+        if equipment_pending then
+            local state=native("equipment_ready")
+            assert(state=="ready" or state=="pending",state)
+            equipment_pending=state=="pending"
+        end
+        for key,entry in pairs(warming) do
+            local factory=entry.factory
+            if not factory:call("get_Valid") or not factory:call("get_Standby") then warming[key]=nil
+            elseif factory:call("get_Ready") then
+                if entry.reopen then
+                    factory:call("set_Standby",false)
+                    factory:call("set_Standby",true)
+                    entry.reopen=false
+                else warming[key]=nil end
+            end
+        end
+        return {pending=equipment_pending or next(warming)~=nil}
+    end
+    if action=="asset_removed" then
+        assert(not M.active(),"Resource transaction active")
+        local paths=assert(req.paths)
+        if #paths==0 then return {results={}} end
+        local names,seen,by_ext={},{},{}
+        local warm,dormant={},{}
+        local equipment,retiring_visuals,preview_targets={},{},{}
+        -- Synchronous discovery only. A later frame, bind or player rebuild
+        -- must enumerate the scene again before it can publish any resources.
+        local components_by_type={}
+        local live={}
+        for _,p in ipairs(req.live_reentry or paths) do live[p:lower()]=true end
+        local compound=#(req.live_reentry or paths)>1
+        local function add(name)
+            if not seen[name] then seen[name]=true;names[#names+1]=name end
+        end
+        for _,path in ipairs(paths) do
+            add(path)
+            for _,alias in ipairs((req.aliases or {})[path] or {}) do
+                if alias:lower()==path:lower() then add(alias) end
+            end
+            local ext=path:lower():match("%.([a-z0-9]+)$")
+            by_ext[ext]=by_ext[ext] or {}
+            by_ext[ext][path:lower()]=true
+        end
+        for ext,wanted in pairs(by_ext) do
+            if kinds[ext] and ext~="user" then
+                local ok,owners=pcall(bindings,wanted,kinds[ext],ext,true,components_by_type)
+                if ok then
+                    for _,owner in ipairs(owners) do
+                        add(owner.path)
+                        if owner.preview then preview_targets[owner.path:lower()]=owner.path end
+                        local go=not owner.preview and owner.comp:call("get_GameObject")
+                        if go and (ext=="mesh" or ext=="mdf2") then
+                            local id=owner.comp:get_address()
+                            local previous=retiring_visuals[id] or {go=go}
+                            previous[ext]=tostring(owner.old:read_qword(0x10))
+                            retiring_visuals[id]=previous
+                        end
+                        if live[owner.path:lower()] and go and go:call("get_Update") and
+                                (ext=="mesh" or ext=="mdf2") and owner.path:lower():match("^player/mod/") then
+                            for _,kind in ipairs({kinds.mesh,kinds.mdf2}) do
+                                local h=owner.comp:call(kind[3])
+                                local name=h and h:call("get_ResourcePath")
+                                if name and not (req.missing or {})[name:lower()] then equipment[name]=kind[2] end
+                            end
+                        end
+                        -- A partially constructed outfit can temporarily have an
+                        -- inactive component. Its prefab owns the whole new set.
+                        if live[owner.path:lower()] and not (compound and (ext=="mesh" or ext=="mdf2" or ext=="chain" or ext=="jcns"))
+                                and go and not go:call("get_Update") then
+                            local key=owner.path:lower()
+                            owner.address=tostring(owner.old:read_qword(0x10))
+                            owner.go=go
+                            owner.old=nil
+                            dormant[key]=dormant[key] or {}
+                            dormant[key][#dormant[key]+1]=owner
+                        end
+                    end
+                end
+            elseif ext=="pfb" then
+                pin_prefab_instances(wanted)
+                local function visit(factory)
+                    if not factory or not factory:call("get_Valid") then return end
+                    local name=factory:call("get_ResourcePath")
+                    if name and wanted[name:lower()] then
+                        add(name)
+                        if factory:call("get_Standby") then warm[factory:get_address()]=factory end
+                    end
+                end
+                for _,factory in pairs(prefab_factories) do visit(factory) end
+                equipment_factories(wanted,visit)
+            elseif ext=="gui" then
+                local ok,components=pcall(scene_components,"via.gui.GUI",components_by_type)
+                if ok then
+                    for _,gui in ipairs(components) do
+                        local h=gui:call("get_Asset")
+                        local name=h and h:call("get_ResourcePath")
+                        if name and wanted[name:lower()] then add(name) end
+                    end
+                end
+            end
+        end
+        local f=assert(io.open("MHRS-Files-HotReload/asset-paths.txt","wb"))
+        f:write(table.concat(names,"\n"),"\n")
+        f:close()
+        local state=native("forget_batch")
+        assert(state=="retired batch",state)
+        if by_ext.uvs then
+            for path in pairs(by_ext.uvs) do gui_sequences[path]=nil end
+            update_gui_assets()
+        end
+        for path in pairs(by_ext.pfb or {}) do prefab_values[path]=nil end
+        for id,entry in pairs(retiring_visuals) do
+            local previous=retired_visuals[id]
+            if previous and previous.go==entry.go then
+                previous.mesh=entry.mesh or previous.mesh
+                previous.mdf2=entry.mdf2 or previous.mdf2
+            else
+                track_instance(retired_visuals,id,entry)
+            end
+            deferred_materials[id]=nil
+        end
+        if next(equipment) then
+            local f=assert(io.open("MHRS-Files-HotReload/equipment-paths.txt","wb"))
+            local fresh={}
+            for name,kind in pairs(equipment) do
+                fresh[name]=sdk.create_resource(kind,name)
+                if fresh[name] then f:write(name,"\n") end
+            end
+            f:close()
+            release_equipment()
+            equipment_refs=fresh
+            equipment_pending=next(fresh)~=nil
+        end
+        -- A ready via.Prefab can retain its previous serialized hierarchy even
+        -- after the resource key is retired. Reopen the existing factory as
+        -- well so its next instantiate() uses the replacement hierarchy.
+        local factory_count=0
+        for key,factory in pairs(warm) do
+            local ready=factory:call("get_Ready")
+            if ready then
+                factory:call("set_Standby",false)
+                factory:call("set_Standby",true)
+            end
+            warming[key]={factory=factory,reopen=not ready}
+            factory_count=factory_count+1
+        end
+        local counts=assert(io.open("MHRS-Files-HotReload/retired-counts.txt","r"))
+        local results,totals={},{}
+        for _,name in ipairs(names) do
+            local n=tonumber(counts:read("*l"))
+            if not n then counts:close();error("Incomplete retirement receipt") end
+            totals[name:lower()]=(totals[name:lower()] or 0)+n
+        end
+        for i,path in ipairs(paths) do
+            local n=totals[path:lower()]
+            sleeping[path:lower()]=dormant[path:lower()]
+            prefab_values[path:lower()]=nil
+            results[i]={path=path,state=n>0 and "retired" or "not cached",generations=n}
+        end
+        counts:close()
+        return {results=results,factories=factory_count,equipment=equipment_pending,sleeping=next(sleeping)~=nil,
+            preview_targets=preview_targets}
+    end
     if action=="asset_prefab_forget" then prefab_values[req.path:lower()]=nil;return {} end
     if action=="asset_prefab" then return update_prefab(req.path,req.edits) end
     if action=="asset_marker" or action=="asset_marker_inspect" then
@@ -482,15 +1145,78 @@ function M.run(action,req,native)
     if action=="asset_gui" or action=="asset_gui_inspect" then
         return gui_views(req.path,req.edits or {},action=="asset_gui")
     end
+    if action=="asset_active_consumers" then
+        local groups,seen,paths={},{},{}
+        for _,path in ipairs(req.paths) do
+            local ext=path:match("%.([a-z0-9]+)$")
+            assert(ext=="efx" or ext=="uvs" or ext=="motlist","Unsupported dependent type")
+            groups[ext]=groups[ext] or {}
+            groups[ext][path:lower()]=true
+        end
+        for ext,wanted in pairs(groups) do
+            for _,b in ipairs(bindings(wanted,kinds[ext],ext)) do
+                local path=b.path:lower()
+                if not seen[path] then seen[path]=true;paths[#paths+1]=path end
+            end
+        end
+        return {paths=paths}
+    end
+    if action=="asset_gui_links" then
+        local wanted,seen,records={},{},{}
+        for _,p in ipairs(req.paths) do wanted[p:lower()]=true end
+        local ok,users=pcall(bindings,wanted,kinds.uvs,"uvs",not req.active_only)
+        if ok then
+            for _,b in ipairs(users) do
+                local h=b.comp:call("get_Asset")
+                local p=h and h:call("get_ResourcePath")
+                if p and p:lower():match("%.gui$") and not seen[p.."\t"..b.path] then
+                    seen[p.."\t"..b.path]=true
+                    records[#records+1]={owner=p,child=b.path}
+                end
+            end
+        end
+        return {links=records}
+    end
+    if action=="asset_material_paths" or action=="asset_material_links" then
+        local paths,seen={},{}
+        local ok,meshes=pcall(scene_components,kinds.mdf2[1])
+        if not ok then
+            if action=="asset_material_links" then return {links={}} end
+            error(meshes)
+        end
+        for _,comp in ipairs(meshes) do
+            local go=comp:call("get_GameObject")
+            if go and ((action=="asset_material_links" and comp:call("get_MaterialReady")) or go:call("get_Update")) then
+                local h=comp:call("get_Material")
+                local path=h and h:call("get_ResourcePath")
+                if path and not seen[path] then paths[#paths+1]=path;seen[path]=true end
+            end
+        end
+        if action=="asset_material_links" then
+            local f=assert(io.open("MHRS-Files-HotReload/material-paths.txt","wb"))
+            for _,path in ipairs(req.paths) do f:write(path,"\n") end
+            for _,path in ipairs(paths) do f:write(path,"\n") end
+            f:close()
+            local state=native("material_links")
+            assert(state=="material links",state)
+            local records={}
+            for line in io.lines("MHRS-Files-HotReload/material-links.txt") do
+                local owner,child=line:match("^([^\t]+)\t(.+)$")
+                if owner then records[#records+1]={owner=owner,child=child} end
+            end
+            return {links=records}
+        end
+        return {paths=paths}
+    end
     if action=="asset_master_begin" then
         local ext=req.path:lower():match("%.([a-z0-9]+)$")
         local allowed={mmtr=true,uvs=true,uvar=true,tex=true,mot=true,rtex=true,mesh=true,mdf2=true}
         assert(not job and (not master or (master.held and ext=="uvs" and master.ext=="tex")) and allowed[ext],"Invalid dependency transaction")
         local f=assert(io.open("MHRS-Files-HotReload/asset-path.txt","wb"))
-        f:write(req.path); f:close()
+        f:write(req.platform and "@" or "",req.path); f:close()
         local state,address=native("asset")
         assert(state=="pending",state)
-        master={held=false,parent=master,ext=ext}
+        master={held=false,parent=master,ext=ext,owners=ext=="mmtr" and {} or nil}
         return {state=state,resource=address}
     end
     if action=="asset_master_poll" then
@@ -504,6 +1230,11 @@ function M.run(action,req,native)
     end
     if action=="asset_master_commit" or action=="asset_master_abort" then
         assert(master and not job,"Dependent MDF transaction still active")
+        if master.owners and master.held then
+            local state=finish_materials(master,action=="asset_master_commit",native)
+            master=master.parent
+            return {state=state}
+        end
         if master.held then assert(native("resume_master")=="resumed");master.held=false end
         local commit=action=="asset_master_commit"
         local state=native(commit and "commit" or "abort")
@@ -557,7 +1288,24 @@ function M.run(action,req,native)
         end
         local list=bindings(job.path,job.kind,job.ext)
         assert(#list>0,"Resource no longer equipped")
-        for _,b in ipairs(list) do assert(b.old:read_qword(0x10)==job.old,"Equipped binding changed") end
+        for _,b in ipairs(list) do
+            local expected=job.old
+            if job.mdf_slots then
+                expected=job.mdf_slots[b.comp:get_address()]
+            elseif job.holder_slots then
+                expected=job.holder_slots[b.slot_key]
+            end
+            assert(b.old:read_qword(0x10)==expected,"Equipped binding changed")
+        end
+        if job.ext=="mdf2" and master and master.owners then
+            assert(#list==job.count,"MDF users changed before staging")
+            local state=native("stage_mdf")
+            assert(state=="staged",state)
+            table.insert(master.owners,{path=job.path,count=#list,slots=job.mdf_slots,fresh=job.fresh})
+            local owner_address=job.fresh
+            job=nil
+            return {state=state,resource=owner_address,bindings=#list}
+        end
         local res=assert(sdk.create_resource(job.kind[2],job.path))
         local address=tostring(res:get_address())
         local holder_type=job.ext=="motlist" and "via.motion.MotionListBaseResourceHolder" or job.kind[2].."Holder"
@@ -579,10 +1327,10 @@ function M.run(action,req,native)
         local ok,err=pcall(function()
             for i,b in ipairs(list) do
                 touched=i
-                if job.ext=="mdf2" and b.comp:call("get_MaterialReady") then b.switches=switches(b.comp) end
+                if job.ext=="mdf2" and b.comp:call("get_MaterialReady") then b.switches=material_state(b.comp,job.preserve) end
                 assign(b,h)
                 assert(tostring(holder(b):read_qword(0x10))==address,"Binding did not take effect")
-                if b.switches and b.comp:call("get_MaterialReady") then restore_switches(b.comp,b.switches) end
+                restore_when_ready(b)
             end
 
             local state=native("commit")
@@ -592,10 +1340,11 @@ function M.run(action,req,native)
             for i=touched,1,-1 do
                 local b=list[i]
                 assign(b,b.old)
-                if b.switches and b.comp:call("get_MaterialReady") then restore_switches(b.comp,b.switches) end
+                restore_when_ready(b)
             end
             error(err)
         end
+        if job.ext=="uvs" then remember_gui_sequence(job,list,h) end
         job=nil
         return {state="committed",resource=address,bindings=#list}
     end
@@ -604,16 +1353,40 @@ function M.run(action,req,native)
     local kind=assert(kinds[ext],"Unsupported asset")
     if ext=="user" then return user_data(path,req.edits or {},action=="asset_user") end
     local list=bindings(path,kind,ext)
+    if action=="asset_preview_size" then
+        assert(ext=="rtex" and #list>0,"No active render target")
+        local f=assert(io.open("MHRS-Files-HotReload/asset-path.txt","wb"))
+        f:write(list[1].path);f:close()
+        local dimensions,address=native("preview_size")
+        local width,height=dimensions:match("^(%d+) (%d+)$")
+        assert(width and tostring(list[1].old:read_qword(0x10))==address,"Preview target changed or is not ready")
+        return {path=list[1].path,resource=address,width=tonumber(width),height=tonumber(height)}
+    end
     if action=="asset_inspect" then return {bindings=binding_report(list,ext)} end
     assert(action=="asset_begin" and not job and (not master or (master.held and
-        (ext=="mdf2" or ext=="efx" or ext=="motlist"))),"Invalid asset request")
+        (ext=="mdf2" or ext=="efx" or ext=="motlist" or (ext=="uvs" and master.ext=="rtex")))),"Invalid asset request")
     assert(#list>0,"No matching active resource user")
+    if ext=="mesh" or ext=="mdf2" or ext=="tex" then
+        for _,b in ipairs(list) do assert(current_geometry(b.comp),"Previous equipment generation is still attached") end
+    end
     local f=assert(io.open("MHRS-Files-HotReload/asset-path.txt","wb"))
-    f:write(list[1].path); f:close()
+    f:write(req.platform and "@" or "",list[1].path); f:close()
     local state,address=native("asset")
     assert(state=="pending",state)
     job={kind=kind,ext=ext,path=list[1].path,old=list[1].old:read_qword(0x10),fresh=address,
-        expected_outputs=ext=="jcns" and req.expected_outputs}
+        expected_outputs=ext=="jcns" and req.expected_outputs,preserve=req.preserve,gui_owners=req.gui_owners}
+    if ext=="mdf2" then
+        job.count=#list
+        job.mdf_slots={}
+        for _,b in ipairs(list) do job.mdf_slots[b.comp:get_address()]=b.old:read_qword(0x10) end
+    elseif ext=="rtex" or ext=="uvs" then
+        -- Cameras, preview slots and GUI elements need not share the same
+        -- prior generation. Validate each live slot against its own snapshot.
+        job.holder_slots={}
+        for _,b in ipairs(list) do
+            job.holder_slots[b.slot_key]=b.old:read_qword(0x10)
+        end
+    end
     return {state=state,address=address,bindings=#list}
 end
 return M

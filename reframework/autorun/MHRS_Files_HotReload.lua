@@ -1,11 +1,11 @@
--- A narrowly scoped experiment for the local hunter's f_arm279 material.
+-- Dispatch path-based hot reloads and the legacy f_arm279 command-line diagnostics.
 local base = "player/mod/f/pl279/f_arm279"
 local original = base .. ".mdf2"
 local data = "MHRS-Files-HotReload/"
 local mesh_type = sdk.typeof("via.render.Mesh")
 local arm_mdf = require("MHRS_HotReload.arm_mdf")
 local outfit = require("MHRS_HotReload.outfit")
-local interval, last_id = 0, nil
+local next_check, fast_until, last_id = 0, 0, nil
 
 local function arm()
     local manager = sdk.get_managed_singleton("snow.player.PlayerManager")
@@ -180,37 +180,35 @@ local function run(action,req)
     return {before = before, requested = path, resource = tostring(res:get_address())}
 end
 
-local queued, feedback
+local watch_dll="reframework/data/MHRS-Files-HotReload/request_watch.dll"
+local request_changed=package.loadlib(watch_dll,"mhrs_request_changed")
+local close_request_watch=package.loadlib(watch_dll,"mhrs_close_request_watch")
+if request_changed then request_changed(true) end
 re.on_script_reset(function()
+    if close_request_watch then close_request_watch() end
     if native_job then native_action("native_abort") end
-    if outfit.active() then outfit.reset(native) end
+    outfit.reset(native)
 end)
-re.on_draw_ui(function()
-    if not imgui.tree_node("MHRS Files HotReload") then return end
-    if imgui.button("Capture f_arm279 before editing") then queued = "capture" end
-    if imgui.button("Read MDF and refresh arm colors") then queued = "refresh" end
-    if feedback then imgui.text(feedback) end
-    imgui.tree_pop()
-end)
-
 -- A request is executed once per id. The host requests another independent sample
 -- after the engine has had time to finish rendering with the assigned holder.
 local initial = json.load_file(data .. "request.json")
 last_id = initial and initial.id
 json.dump_file(data .. "status.json", {state = "loaded"})
 re.on_application_entry("UpdateBehavior", function()
-    if queued then
-        local action = queued
-        queued = nil
-        local ok, value = pcall(run, action)
-        feedback = ok and (action == "capture" and ("Captured: " .. value.bindings)
-            or ("Updated: " .. value.changed)) or tostring(value)
-    end
-    if os.clock() < interval then return end
-    interval = os.clock() + 0.25
+    local now = os.clock()
+    if now < next_check then return end
+    next_check = request_changed and now < fast_until and now or now + 0.25
+    if request_changed and not request_changed(true) then return end
     local req = json.load_file(data .. "request.json")
-    if not req or type(req.id) ~= "string" or req.id == last_id then return end
+    if not req or type(req.id) ~= "string" or req.id == last_id then
+        -- The native fallback can report dirty repeatedly after an I/O error.
+        next_check = now + 0.25
+        return
+    end
     last_id = req.id
     local ok, value = pcall(run, req.action, req)
     json.dump_file(data .. "status.json", {id = req.id, action = req.action, ok = ok, result = ok and value or tostring(value)})
+    -- During a burst, service the next ready command on the next engine update.
+    -- A silent channel returns to its normal idle cadence.
+    if request_changed then fast_until = os.clock() + 0.5; next_check = 0 end
 end)

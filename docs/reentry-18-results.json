@@ -1,0 +1,902 @@
+{
+  "rise": "Steam 16.0.2.0 / Build 17920865",
+  "reframework": "c4b13148",
+  "phases": [
+    "stock",
+    "A",
+    "B",
+    "return"
+  ],
+  "formats": {
+    "chain": {
+      "path": "npc/mod/npc018_00/npc018_00_body/npc018.chain",
+      "stock_sha256": "a71eae1b4a00c3edc886c0dc0459f739c4da07a3e21e902e12aee8b8248d8c23",
+      "A_sha256": "c30df496275ecf1283098febb981933224556bccecf3d73744b2286682b3f14c",
+      "B_sha256": "4d8001f5639063878597b7dc3dc53a539407db59cae2c4f06e8f47c59893eefc",
+      "values": [
+        4,
+        3,
+        2,
+        4
+      ],
+      "level": "component"
+    },
+    "jcns": {
+      "path": "player/mod/f/pl279/f_wst279_drv.jcns",
+      "stock_sha256": "5d94c616c77f7b698b513382278d6f838db3ab96ef45f7cf28def7a633d3baa7",
+      "A_sha256": "49164d7a258dae4aab1a6fc2fe74d0a6c2868b9c83a9d3b6acb310cc05c81389",
+      "B_sha256": "a0f87c43769e367ec4c37b56d489eec3644f6d1abe8c2e1a9121f88b9953ea1e",
+      "values": [
+        4,
+        3,
+        2,
+        4
+      ],
+      "level": "component"
+    },
+    "motbank": {
+      "path": "npc/mot/npc018_00/npc018_00_bank.motbank",
+      "stock_sha256": "5d9eac2a300a02fb4c2b201a2cf4911aea091d4613a85b5d8b0abea7e5bfc8c0",
+      "A_sha256": "1af9c7925cdaf897e79a41f44a8e758a5ab8ee37faad8880a7912c511ea33d3b",
+      "B_sha256": "a464e9993f03b0fb1201b55d2392a4f6fd3541915082580654343dbfd32fe086",
+      "values": [
+        [
+          0,
+          10
+        ],
+        [
+          0,
+          11
+        ],
+        [
+          0,
+          12
+        ],
+        [
+          0,
+          10
+        ]
+      ],
+      "level": "component"
+    },
+    "motlist": {
+      "path": "npc/mot/npc018_00/npc018_00_10.motlist",
+      "stock_sha256": "f8e36932a51601d7a7c2c49aeef835c3b3f31dbe3e09ac703f23245c939b66ca",
+      "A_sha256": "d8130bb177861c88f26f296a49282471c96474d2b5707c3be40c35c8b02c5e24",
+      "B_sha256": "584235d4757b742008aeb187ff70ad230b74d47eb3bc077054efb3b0fc815150",
+      "values": [
+        7,
+        4,
+        20,
+        7
+      ],
+      "level": "component"
+    },
+    "uvar": {
+      "path": "enemy/em001/00/user_variables/em001_00_mot.uvar",
+      "stock_sha256": "3f50f6138333021b5509b1191753ab1fb5233c309738a1a15b60998a695056a5",
+      "A_sha256": "79affc3a43e828417983df9cc4cf662df7a5910d56f4b02c37cf8cbaa41a517f",
+      "B_sha256": "853e058b311efca42c3c3668b88217460d09dab6f3cf76a252975dfa98ba4c11",
+      "values": [
+        [
+          "em001_00_mot",
+          "commonEnemyVariable"
+        ],
+        [
+          "em002_00_mot",
+          "commonEnemyVariable"
+        ],
+        [
+          "em003_00_mot",
+          "commonEnemyVariable"
+        ],
+        [
+          "em001_00_mot",
+          "commonEnemyVariable"
+        ]
+      ],
+      "level": "component"
+    },
+    "fbxskel": {
+      "path": "item/acc/acc033/mod/acc033.fbxskel",
+      "stock_sha256": "6b099d7c37ec1437d78668884c37924cff2a68ea34771e49958ed22b6bf3c0cf",
+      "A_sha256": "443b2923e881dcf26c5b43e843550ebffd366c16e3c29d9543eb0c03db01556f",
+      "B_sha256": "83c8bd0502bddb5f0e4f2f7b83808317695c2f9f71edf84ed2bbfe5a04e5e120",
+      "values": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.125,
+          0.0,
+          0.0
+        ],
+        [
+          0.25,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "level": "component"
+    },
+    "efx": {
+      "path": "vfx/editor/efd_cm/efd_0004_cm_64_0000.efx",
+      "stock_sha256": "1ab8498a42a41d92c1cd05313449089e9c7bf3d16b82aafccf40a6b0ef1123c6",
+      "A_sha256": "92af8bac4d8614dd5604d9372698518e74a93b8288335c26bf13f51a3e5566e9",
+      "B_sha256": "065442ffe393e0ccf94852108f76a235d7bd639caa79d78114e17ed575daa7cd",
+      "values": [
+        4,
+        5,
+        2,
+        4
+      ],
+      "level": "component"
+    },
+    "gui": {
+      "path": "gui/03_lobby/speechballoon.gui",
+      "stock_sha256": "498a3fb1b975bd9149e4dfc37b223682d8730c6a677e20297c472ebd7f65d28e",
+      "A_sha256": "02b70a88d02e65ef18eb85e44ec2cad67a2d2c16421c65d9f9e1562b28e172d0",
+      "B_sha256": "137a3f9ce5650d6d340fdafeb130db757a601e325be6edbb61e12915bb28bdce",
+      "values": [
+        60.0,
+        41.0,
+        37.0,
+        60.0
+      ],
+      "level": "component",
+      "structure": {
+        "path": "gui/03_lobby/speechballoon.gui",
+        "stock_sha256": "498a3fb1b975bd9149e4dfc37b223682d8730c6a677e20297c472ebd7f65d28e",
+        "A_sha256": "624c2fc803a09f163a1e13520c7ea9140270cb47129b9f961569028302fb73b0",
+        "B_sha256": "d12c6cce47fc0a3983fc63c6009215129bf7a1a02267bae79a05b5e66f46c884",
+        "values": [
+          {
+            "via.gui.Text": 1,
+            "via.gui.Texture": 0,
+            "via.gui.TextureSet": 0
+          },
+          {
+            "via.gui.Text": 19,
+            "via.gui.Texture": 27,
+            "via.gui.TextureSet": 1
+          },
+          {
+            "via.gui.Text": 1,
+            "via.gui.Texture": 1,
+            "via.gui.TextureSet": 1
+          },
+          {
+            "via.gui.Text": 1,
+            "via.gui.Texture": 0,
+            "via.gui.TextureSet": 0
+          }
+        ],
+        "level": "component"
+      }
+    },
+    "user": {
+      "path": "camera/fsm/fixedcanera/roomservice/roomservice_end.user",
+      "stock_sha256": "8a92d3c6575691edd653d65ed4f3211539833bd2814d341f15efb6c58a5d1e17",
+      "A_sha256": "e9b33d73c056a88494729e5865047081ebf9bed2d9a724621176aa6285252421",
+      "B_sha256": "5dd91eb3f6a64124e519886e0ddc07d1af9cb0737f89481e81540a5d3dcacc3e",
+      "values": [
+        60.0,
+        24.0,
+        48.0,
+        60.0
+      ],
+      "level": "component",
+      "structure": {
+        "path": "sound/asset/em/em_com/other/em_mystery_settingdata.user",
+        "stock_sha256": "dbb0f0ec17c2e176c732c9ae67e73a8f66035a7e098c901504064f397dc16425",
+        "A_sha256": "86c80f2bb20d2ffc69ca07a0e0a1bb4d8f885f4c07fae0ba64f40b33f61d7c94",
+        "B_sha256": "9bfee0747f55ea8b05ef6f2e714263a155d96aa906bf61526882332d3593b8a7",
+        "values": [
+          "Sound/Asset/Em/Em_Com/Other/MysteryMediaPrefab.pfb",
+          "pop/marker/playerinfluence/itemtake.pfb",
+          "huntingmachine/hm12/001/prefab/hm12_001.pfb",
+          "Sound/Asset/Em/Em_Com/Other/MysteryMediaPrefab.pfb"
+        ],
+        "level": "component"
+      }
+    },
+    "pfb": {
+      "path": "pop/marker/playerinfluence/itemtake.pfb",
+      "stock_sha256": "ac45908cdc8477ee986b1d8a69e2f1ecee1ef80e1025a4969ac205f4be45f179",
+      "A_sha256": "906e5202c51ab9bcea6c9cfe85a8856e5feda9ffb5ac49fe39111a857ed209bf",
+      "B_sha256": "960edf09a9e15818fb8ee5a3fc48cb6b213492abe3774608d35003c1299b70ba",
+      "values": [
+        -1.0,
+        0.5625,
+        0.75,
+        -1.0
+      ],
+      "level": "component",
+      "structure": {
+        "path": "pop/marker/playerinfluence/itemtake.pfb",
+        "stock_sha256": "ac45908cdc8477ee986b1d8a69e2f1ecee1ef80e1025a4969ac205f4be45f179",
+        "A_sha256": "3b32762ca08f89542f4b21af2d9ac860f0afb48c405b3125342a4cef4e63797a",
+        "B_sha256": "cc6876108f478bea5948e37ee2cd6b2d22b22e55b1872ea004133144cd5f7b3a",
+        "values": [
+          "ItemTake",
+          "epvs_0004_ec010_00_0000",
+          "hm12_001",
+          "ItemTake"
+        ],
+        "level": "component"
+      },
+      "fresh_factory_before_279": [
+        "ItemTake",
+        "epvs_0004_ec010_00_0000",
+        "hm12_001",
+        "ItemTake"
+      ],
+      "fresh_factory_after_279": [
+        "ItemTake",
+        "epvs_0004_ec010_00_0000",
+        "hm12_001",
+        "ItemTake"
+      ],
+      "same_factory": [
+        "ItemTake",
+        "epvs_0004_ec010_00_0000",
+        "hm12_001",
+        "ItemTake"
+      ]
+    },
+    "rcol": {
+      "path": "pop/marker/playerinfluence/itemtake/itemtakecolliderasset.rcol",
+      "stock_sha256": "ae3fabd30bfd64f37217c8264eca8f9463715d7ffb5407dbb9953b8b56fb17c8",
+      "A_sha256": "45570b6e2b3e8656d1b8bf23b9deef446b2349d6fb65e67c547f210fb3ed5299",
+      "B_sha256": "f944fcbed5904a0acda3d04974151f93ad194be1453e9e3bcb2eb3f8e1163758",
+      "values": [
+        2.3,
+        2.625,
+        2.875,
+        2.3
+      ],
+      "level": "component",
+      "same_factory": [
+        2.3,
+        2.625,
+        2.875,
+        2.3
+      ]
+    },
+    "tex": {
+      "path": "vfx/mtu/tex_0004_cm_02_0108_alpg.tex",
+      "stock_sha256": "d36ead0f6dc500c665181f6f3b19e4f5546248197e7bcabfd54151383ea5ccc5",
+      "A_sha256": "0f0a33d09e6f604fe600d8898b08e96915c4ba3535b5133b26ec30f89dcfe2b1",
+      "B_sha256": "3c37cc5f2f4691b7598af4dd1ea49cade8abbbbbe6ce1936f945057a87b0aabc",
+      "level": "reopened",
+      "A_open_ms": 95.82,
+      "B_open_ms": 56.21,
+      "resource_addresses": [
+        "2021819830144",
+        "2021819830400",
+        "2021819830656",
+        "2021819830912"
+      ],
+      "pixels": {
+        "roi": [
+          1110,
+          726,
+          1445,
+          1190
+        ],
+        "samples": [
+          {
+            "phase": "stock",
+            "magenta": 0,
+            "green": 0,
+            "cyan": 1
+          },
+          {
+            "phase": "A",
+            "magenta": 3114,
+            "green": 1,
+            "cyan": 0
+          },
+          {
+            "phase": "B",
+            "magenta": 0,
+            "green": 5793,
+            "cyan": 0
+          },
+          {
+            "phase": "return",
+            "magenta": 0,
+            "green": 0,
+            "cyan": 0
+          }
+        ]
+      }
+    },
+    "uvs": {
+      "path": "vfx/mtu/tex_0004_cm_02_0108.uvs",
+      "stock_sha256": "c30aa69d3f3efc0407c11b07edf86f017f2644af5b3fbafc95d4a68470cba7a2",
+      "A_sha256": "0910a759eca8b618ddb2e2f84b256336199b99b1d1669062201a1a5ec51a5c97",
+      "B_sha256": "2b295662844520fde1b080e8eefef6520fd3e71c41722612ae7dad30ef70198f",
+      "level": "reopened",
+      "A_open_ms": 7.53,
+      "B_open_ms": 2.51,
+      "resource_addresses": [
+        "2021819831168",
+        "2021819831504",
+        "2021819831840",
+        "2021819832176"
+      ],
+      "pixels": {
+        "roi": [
+          1120,
+          1290,
+          1410,
+          1400
+        ],
+        "samples": [
+          {
+            "phase": "stock",
+            "magenta": 0,
+            "green": 0,
+            "cyan": 1200
+          },
+          {
+            "phase": "A",
+            "magenta": 0,
+            "green": 0,
+            "cyan": 0
+          },
+          {
+            "phase": "B",
+            "magenta": 0,
+            "green": 0,
+            "cyan": 2945
+          },
+          {
+            "phase": "return",
+            "magenta": 0,
+            "green": 0,
+            "cyan": 1219
+          }
+        ]
+      }
+    },
+    "rtex": {
+      "path": "camera/texture/rendertarget/previewcamera_equip_uw.rtex",
+      "stock_sha256": "e2cad666c3980617964c233b0f24896951bd5930f6400ac99fd84f9b0ee68517",
+      "A_sha256": "47f6536edf45e668aa96f0a7f68c34b6c2b60dced011a773c5cb32f8cc87ff09",
+      "B_sha256": "66120649f40875e1f6a349822959600dd632714ba8dad05836d252cb17034da0",
+      "level": "reopened",
+      "A_open_ms": 69.75,
+      "B_open_ms": 2.51,
+      "resource_addresses": [
+        "2021819832512",
+        "2021819832960",
+        "2021819833408",
+        "2021819833856"
+      ],
+      "forge_preview": {
+        "stock": {
+          "path": "Camera/Texture/RenderTarget/PreviewCamera_ObjMini.rtex",
+          "resource": "1613537014112",
+          "flags": "01010100",
+          "size": [
+            680,
+            512
+          ]
+        },
+        "mod": {
+          "path": "Camera/Texture/RenderTarget/PreviewCamera_ObjMini.rtex",
+          "resource": "1613537016048",
+          "flags": "01010100",
+          "size": [
+            95,
+            64
+          ]
+        },
+        "restored": {
+          "path": "Camera/Texture/RenderTarget/PreviewCamera_ObjMini.rtex",
+          "resource": "1613536959472",
+          "flags": "01010100",
+          "size": [
+            680,
+            512
+          ]
+        }
+      },
+      "platform_target": {
+        "stock": {
+          "height": 512,
+          "path": "Camera/Texture/RenderTarget/PreviewCamera_ObjMini.rtex",
+          "resource": "2320029448176",
+          "width": 680,
+          "bindings": [
+            {
+              "component": "2317648187760",
+              "object": "GuiManager.previewTextureList",
+              "path": "Camera/Texture/RenderTarget/PreviewCamera_ObjMini.rtex",
+              "resource": "2320029448176"
+            }
+          ]
+        },
+        "A": {
+          "height": 64,
+          "path": "Camera/Texture/RenderTarget/PreviewCamera_ObjMini.rtex",
+          "resource": "2320032144208",
+          "width": 95,
+          "bindings": [
+            {
+              "component": "2317648187760",
+              "object": "GuiManager.previewTextureList",
+              "path": "Camera/Texture/RenderTarget/PreviewCamera_ObjMini.rtex",
+              "resource": "2320032144208"
+            }
+          ]
+        },
+        "B": {
+          "height": 95,
+          "path": "Camera/Texture/RenderTarget/PreviewCamera_ObjMini.rtex",
+          "resource": "2320032144656",
+          "width": 191,
+          "bindings": [
+            {
+              "component": "2317648187760",
+              "object": "GuiManager.previewTextureList",
+              "path": "Camera/Texture/RenderTarget/PreviewCamera_ObjMini.rtex",
+              "resource": "2320032144656"
+            }
+          ]
+        },
+        "return": {
+          "height": 512,
+          "path": "Camera/Texture/RenderTarget/PreviewCamera_ObjMini.rtex",
+          "resource": "2320032146672",
+          "width": 680,
+          "bindings": [
+            {
+              "component": "2317648187760",
+              "object": "GuiManager.previewTextureList",
+              "path": "Camera/Texture/RenderTarget/PreviewCamera_ObjMini.rtex",
+              "resource": "2320032146672"
+            }
+          ]
+        },
+        "sha256": [
+          "3d33e0ca0dc0c709710c7e3ae02d86cb649d636c803fcdd4aaa35ca7913e9120",
+          "c3ee4514004510d686c3ae599ea2f0fdbe75a6aba597b786e864538cfcdde575",
+          "beac01f36771dab837be4db427bfb0bfed821dd6c7c911f18912aca1620e25d5"
+        ]
+      }
+    },
+    "mmtr": {
+      "path": "mastermaterial/master/obj/npc/pl_npc_mmtrv/pl_default_dem.mmtr",
+      "stock_sha256": "87307e8acb391b27ac96bd1d26b879f8a827303a83e024715bcc5423950284e0",
+      "A_sha256": "a3f1d8541ee795f3183b860e0ec2c90a7dd56c16667f7249b35f0efc64df95cc",
+      "B_sha256": "7bb3c1da0ddbb99b972d71d49a3bf16b56e85692fd5c697c4e0f33118f9fcc06",
+      "level": "reopened",
+      "A_open_ms": 4.51,
+      "B_open_ms": 5.52,
+      "resource_addresses": [
+        "2021819834304",
+        "2021819834672",
+        "2021819835040",
+        "2021819835408"
+      ],
+      "pixels": {
+        "roi": [
+          1110,
+          726,
+          1445,
+          1190
+        ],
+        "samples": [
+          {
+            "phase": "stock",
+            "magenta": 0,
+            "green": 2,
+            "cyan": 0
+          },
+          {
+            "phase": "A",
+            "magenta": 73571,
+            "green": 1,
+            "cyan": 0
+          },
+          {
+            "phase": "B",
+            "magenta": 0,
+            "green": 73637,
+            "cyan": 0
+          },
+          {
+            "phase": "return",
+            "magenta": 0,
+            "green": 1,
+            "cyan": 0
+          }
+        ]
+      }
+    },
+    "mesh": {
+      "source": "outfit279",
+      "phase_order": [
+        "A",
+        "B",
+        "stock",
+        "restored"
+      ],
+      "lods": [
+        1,
+        5,
+        5,
+        1
+      ]
+    },
+    "mdf2": {
+      "source": "outfit279",
+      "phase_order": [
+        "A",
+        "B",
+        "stock",
+        "restored"
+      ],
+      "slot_counts": [
+        6,
+        3,
+        2,
+        6
+      ],
+      "before_file_save": {
+        "S_col_R": {
+          "kind": 4,
+          "value": [
+            0.7152999639511108,
+            0.6485386490821838,
+            0.21458999812602997,
+            1.0
+          ]
+        },
+        "moon_RimColor": {
+          "kind": 4,
+          "value": [
+            0.125,
+            0.25,
+            0.375,
+            1.0
+          ]
+        },
+        "moon_RimParam2": {
+          "kind": 4,
+          "value": [
+            0.625,
+            0.5,
+            0.75,
+            0.875
+          ]
+        }
+      },
+      "after_file_save": {
+        "S_col_R": {
+          "kind": 4,
+          "value": [
+            0.7152999639511108,
+            0.6485386490821838,
+            0.21458999812602997,
+            1.0
+          ]
+        },
+        "moon_RimColor": {
+          "kind": 4,
+          "value": [
+            0.125,
+            0.25,
+            0.375,
+            1.0
+          ]
+        },
+        "moon_RimParam2": {
+          "kind": 4,
+          "value": [
+            0.25,
+            0.125,
+            0.5,
+            0.75
+          ]
+        }
+      }
+    },
+    "mot": {
+      "path": "stage/v01/a00/mod/v01a00_suisha01.mot",
+      "end_frames": [
+        239.0,
+        119.0,
+        179.0,
+        239.0
+      ],
+      "running_frames": [
+        [
+          76.92646026611328,
+          58.052371978759766,
+          38.30939483642578,
+          19.400615692138672
+        ],
+        [
+          102.81605529785156,
+          83.59673309326172,
+          63.83378601074219,
+          44.6913948059082
+        ],
+        [
+          165.61460876464844,
+          145.92251586914062,
+          127.01068115234375,
+          107.345458984375
+        ],
+        [
+          227.8214874267578,
+          208.65887451171875,
+          189.51292419433594,
+          170.19810485839844
+        ]
+      ],
+      "dormant_then_active": [
+        {
+          "go": "2317522225328",
+          "frame": 73.04166412353516,
+          "finish": 239.0
+        },
+        {
+          "go": "2317522225328",
+          "frame": 56.70320129394531,
+          "finish": 119.0
+        },
+        {
+          "go": "2317522225328",
+          "frame": 16.279647827148438,
+          "finish": 179.0
+        },
+        {
+          "go": "2317522225328",
+          "frame": 75.64704132080078,
+          "finish": 239.0
+        }
+      ]
+    }
+  },
+  "outfit279": {
+    "variant": "265 arm matching mesh and MDF at 279, with stock 279 remaining parts",
+    "original_sha256": {
+      "f_arm279.chain.48": "7b3500d82654d2181feb940bc6bd19905babf8ea2764b5d29972a111d1b1b2cc",
+      "f_arm279.mdf2.23": "23b026bb53abff3983a2a2142334d16a9d6f574026da35d3449d01577dec1e20",
+      "f_arm279.mesh.2109148288": "43f1d30fc92d00426b1406c53231b1272ac8c72f90f28c4d5920b6fcc37ae6a8",
+      "f_body279.mesh.2109148288": "240785120fc3600da432dd960e05ddf48caf00f17a7893e87e4679a6dda89b51",
+      "f_helm279.chain.48": "558dce8128f3c5275dae67ae0b6e6fa88172f324aefd71817a6c9af7ecc7495b",
+      "f_helm279.mdf2.23": "7b093676d766559157b0668e6819db1765487edcad4835f251d850ae5472eb67",
+      "f_helm279.mesh.2109148288": "486b7c30ddc0a2476c9211e0160dcd25ddb79c20a8dfdf59659ada143985ed1c",
+      "f_helm279.user.2": "ab093e5fe9225c2a018a86a776e6ba591020d59455df81e0b034da1791e74b2d",
+      "f_leg279.mesh.2109148288": "240785120fc3600da432dd960e05ddf48caf00f17a7893e87e4679a6dda89b51",
+      "f_shadow.mesh.2109148288": "96e96bf544b60b2508591f6f50dc61646dbfa54492bf901f3aab344b67296339",
+      "f_wst279.chain.48": "91b09932f17cb3f94def1c9657ae8afcd8ecc6dac99c6674a42ae4637c44a964",
+      "f_wst279.mdf2.23": "1d8f5f4c4fb0ec890bc7bef7d8f59bc738af0c5b9685eea6c26bed985dc3b22c",
+      "f_wst279.mesh.2109148288": "c28227d6f30889df79b07ae44b1be7cf30f82ee9944451eeffff2151e58b146d"
+    },
+    "variant_sha256": {
+      "f_arm279.chain.48": "e7aefe2411aedd4bb8cf5bb4139f1a0e55bb5d0ee61ace41bded02baa9e10382",
+      "f_arm279.mdf2.23": "c74f9958b89a8235aed763d8b4ffcf9dc07f4b9a53ea834caf8a06b57867fd5a",
+      "f_arm279.mesh.2109148288": "3a99cdae4393aeb2d8841e736bedbcff0e5e3b1b346b9efc694715b6d5dcb823",
+      "f_body279.mesh.2109148288": "6714e56fd0ce82ffd851bf2b40ebb8ce7a1efa1f46cb1f25026f4e05ba93ff05",
+      "f_helm279.chain.48": "4a8b5efb81e655198b666c7fd54daaf0465519532ce472350888f907cad38fcd",
+      "f_helm279.mdf2.23": "2aa39ca4af045de6f6e7978a788470e67d4dfdc11ee3167a7cdb0c0a47123b33",
+      "f_helm279.mesh.2109148288": "ff74d74d6fadc845c6649de12ab495fadb2d636c39ec58331f755b39879a7f7b",
+      "f_helm279.user.2": "ad4e931347dfa76c5ea9b80ecc42d0f11c45777dde16a83944dc5b88b89b5f71",
+      "f_leg279.mesh.2109148288": "82fd97ca34ad7207febc8975fab85cb66d3ca1599d8a156475e5e1c9672a2d34",
+      "f_wst279.chain.48": "99902afba1d21049f504a7cd514b3430b6dba1602f0c386a42a5ed8c93e32d7b",
+      "f_wst279.mdf2.23": "bdf2b2272a6fecb0f92bb950746c9f757b8ddb0f77916ddb178dbd65dcf19a25",
+      "f_wst279.mesh.2109148288": "a4c664f11a17b8f092448e5bfbf14b14d75a4a0d94bd4a23cd96e5c836c97921"
+    },
+    "phases": {
+      "A": {
+        "player": "2317492880736",
+        "slots": [
+          "Meira_5_outer_Arm",
+          "Meira_6_outer_Arm",
+          "Meira_11_outer_Arm",
+          "Meira_14_outer_Arm",
+          "Meira_5_outer_Body",
+          "Meira_6_outer_Body"
+        ],
+        "lods": 1,
+        "chain_groups": 15,
+        "material_ready": true,
+        "game_object_draw": true
+      },
+      "B": {
+        "player": "2317493143968",
+        "slots": [
+          "f_arm265_01",
+          "skin_hand",
+          "f_arm265_ALPHA"
+        ],
+        "lods": 5,
+        "chain_groups": 2,
+        "material_ready": true,
+        "game_object_draw": false
+      },
+      "stock": {
+        "player": "2317509672320",
+        "slots": [
+          "Arm",
+          "Hand"
+        ],
+        "lods": 5,
+        "chain_groups": 2,
+        "material_ready": true,
+        "game_object_draw": false
+      },
+      "restored": {
+        "player": "2317516823328",
+        "slots": [
+          "Meira_5_outer_Arm",
+          "Meira_6_outer_Arm",
+          "Meira_11_outer_Arm",
+          "Meira_14_outer_Arm",
+          "Meira_5_outer_Body",
+          "Meira_6_outer_Body"
+        ],
+        "lods": 1,
+        "chain_groups": 15,
+        "material_ready": true,
+        "game_object_draw": false
+      }
+    },
+    "switches": {
+      "B_switch": {
+        "away": "f_arm265",
+        "back": {
+          "player": "2317485675904",
+          "slots": [
+            "f_arm265_01",
+            "skin_hand",
+            "f_arm265_ALPHA"
+          ],
+          "lods": 5,
+          "chain_groups": 2,
+          "material_ready": true,
+          "game_object_draw": false
+        }
+      },
+      "stock_switch": {
+        "away": "f_arm265",
+        "back": {
+          "player": "2317497740144",
+          "slots": [
+            "Arm",
+            "Hand"
+          ],
+          "lods": 5,
+          "chain_groups": 2,
+          "material_ready": true,
+          "game_object_draw": false
+        }
+      }
+    },
+    "training_then_village": {
+      "A": {
+        "player": "2317511436608",
+        "slots": [
+          "Meira_5_outer_Arm",
+          "Meira_6_outer_Arm",
+          "Meira_11_outer_Arm",
+          "Meira_14_outer_Arm",
+          "Meira_5_outer_Body",
+          "Meira_6_outer_Body"
+        ],
+        "lods": 1,
+        "chain_groups": 15,
+        "material_ready": true,
+        "game_object_draw": true,
+        "draw": true
+      },
+      "B": {
+        "player": "2317497823024",
+        "slots": [
+          "f_arm265_01",
+          "skin_hand",
+          "f_arm265_ALPHA"
+        ],
+        "lods": 5,
+        "chain_groups": 2,
+        "material_ready": true,
+        "game_object_draw": true,
+        "draw": true
+      },
+      "stock": {
+        "player": "2317507972272",
+        "slots": [
+          "Arm",
+          "Hand"
+        ],
+        "lods": 5,
+        "chain_groups": 2,
+        "material_ready": true,
+        "game_object_draw": true,
+        "draw": true
+      },
+      "restored": {
+        "player": "2317497631680",
+        "slots": [
+          "Meira_5_outer_Arm",
+          "Meira_6_outer_Arm",
+          "Meira_11_outer_Arm",
+          "Meira_14_outer_Arm",
+          "Meira_5_outer_Body",
+          "Meira_6_outer_Body"
+        ],
+        "lods": 1,
+        "chain_groups": 15,
+        "material_ready": true,
+        "game_object_draw": true,
+        "draw": true
+      }
+    }
+  },
+  "watcher": {
+    "options": [],
+    "packaged_paths": 154118,
+    "owners_with_references": 64051,
+    "reference_count": 344082,
+    "material_interfaces": 339
+  },
+  "render_reentry": {
+    "fixture_sha256": {
+      "tex": {
+        "A": "d0cf6b4de55f159b625d64c502da20261ca79bf225ade617b2946f3011122ca9",
+        "B": "a36ca30f009c39d64401f77344a98ffc8ecd8f3af7d36bd3ee68f78343b978a7"
+      },
+      "mmtr": {
+        "A": "7bb3c1da0ddbb99b972d71d49a3bf16b56e85692fd5c697c4e0f33118f9fcc06",
+        "B": "1ed6b2dace9cfe48e819878bc528fe2c17b56fa628678e21d654bc1e61deaacd"
+      },
+      "uvs": {
+        "A": "551e587a6926d6c5fbe1c4b3fb4d2ed315207c678141517aecb96e3fbba00e74",
+        "B": "afc128413209cf1bbbbdaf99a692528cd8c685856d57a03a16527afcba565fa1"
+      }
+    },
+    "hud_copied_with_second_file": [
+      "Added mhrs_verification/hud_batch_marker.user not cached",
+      "Replaced mhrs_verification/hud_batch_marker.user not cached",
+      "Removed mhrs_verification/hud_batch_marker.user not cached"
+    ],
+    "scene_rebuilt_each_phase": true,
+    "restored_player": {
+      "player": "2317507225104",
+      "slots": [
+        "Meira_5_outer_Arm",
+        "Meira_6_outer_Arm",
+        "Meira_11_outer_Arm",
+        "Meira_14_outer_Arm",
+        "Meira_5_outer_Body",
+        "Meira_6_outer_Body"
+      ],
+      "lods": 1,
+      "chain_groups": 15,
+      "material_ready": true,
+      "game_object_draw": false
+    }
+  },
+  "dll_sha256": "6a1630e6737f1eff84fde65770b678304da7f8135243ffe0621d5d38c4625a04",
+  "code_sha256": {
+    "reframework/autorun/MHRS_HotReload/outfit.lua": "b4f93047fd6b884680a6304bd77d3fa30ce54d94b402a83e9c65f290ceb1733c",
+    "tools/watch_outfit.py": "5b11080b43375e0e48b2af8d442b5fa56080fab4b289706144562d51b3528d3e",
+    "tools/resource_links.py": "20193f61d3e4ef8d78d796d8f6eab7550b4e3310623947be0ba876a5c248ca27",
+    "tools/rise-16.0.2-links.json.gz": "0a51fe6545c524b6c03c52ed3fafa2888fbac0dbe996262c9becad678a420130",
+    "tools/rise-16.0.2-shaders.json.gz": "ecc4ce7ad3bdb359e53dbdf1b95344ea6dcbd012b102ce54eb1d25209038ab8c"
+  }
+}
