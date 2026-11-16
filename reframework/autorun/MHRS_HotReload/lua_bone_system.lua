@@ -1,5 +1,6 @@
 -- Let the installed Lua Bone System select the active part and apply its own
--- offsets, at its own animation phase. We only expire its file/selection caches.
+-- offsets at its own animation phase. Refresh its profile cache and supply
+-- the rest positions of the wearer whose joints it is currently processing.
 local M = {}
 local dir = "MHRS-Files-HotReload/"
 local function read(name)
@@ -31,7 +32,8 @@ local function identify(cb)
     local s = locals_of(u.set_joint)
     if s.import_joint_data ~= u.import_joint_data or s.player_joint ~= u.player_joint then return end
     return {parts=u.old_players_parts, imports=u.import_joint_data, selected=u.player_joint,
-            ik=s.ik_initialized, pending=s.ik_pending}
+            ik=s.ik_initialized, pending=s.ik_pending, set_joint=u.set_joint,
+            shadow=s.shadowmesh_data==u.shadowmesh_data and u.shadowmesh_data or nil,base=u.base_position_list}
 end
 
 local function same_map(a, b)
@@ -43,6 +45,77 @@ end
 
 local default_offset = {x=0,y=0,z=0}
 local sparse = {__index=function() return default_offset end}
+
+-- The original owner caches the first instance's rest positions per sex.
+-- A FirstNatives suit can give two hunters of the same sex different rests.
+-- Cache actual rests by transform and shadow resource. The original set_joint
+-- continues to choose and apply the profile, then runs its weapon and IK logic.
+local verified_rests=setmetatable({},{__mode="k"})
+function M.rest_changed(root) verified_rests[root]=(verified_rests[root] or 0)+1 end
+
+local function install_rests(cb,o)
+    if not debug.setupvalue or type(o.shadow)~="table" or type(o.base)~="table" then return false end
+    local cache=setmetatable({},{__mode="k"})
+    local mesh_type
+    local reported={}
+    local function offsets(go,sex,index)
+        mesh_type=mesh_type or sdk.typeof("via.render.Mesh")
+        local mesh=go:call("getComponent(System.Type)",mesh_type)
+        if not mesh or not mesh:call("get_MeshReady") then return end
+        local h=mesh:call("getMesh")
+        local id=h and h:read_qword(0x10)
+        local tr=go:call("get_Transform")
+        if not tr or not id or id==0 then return end
+        local entry=cache[tr]
+        if entry and entry.id==id and entry.revision==verified_rests[go] and entry.sex==sex then return entry.rows end
+        local path=h:call("get_ResourcePath"):lower():gsub("^@",""):gsub("\\","/")
+        if not path:match("^player/mod/[fm]/[^/]+/[fm]_shadow%.mesh$") then return end
+        local rows={}
+        local base=o.base[sex]
+        for _,j in pairs(tr:get_Joints()) do
+            local name=j:get_Name()
+            local b=base[name]
+            if b then
+                local p=j:call("get_BaseLocalPosition")
+                rows[name]={x=p.x-b.x,y=p.y-b.y,z=p.z-b.z}
+            else rows[name]=default_offset end
+        end
+        if not next(rows) then return end
+        for name in pairs(base) do if not rows[name] then return rows end end
+        cache[tr]={id=id,revision=verified_rests[go],sex=sex,rows=rows}
+        if index~=nil and reported[index]~=id then
+            reported[index]=id
+            log.info("[MHRS-Files-HotReload] Lua Bone System sampled shadow rests for hunter "..index)
+        end
+        return rows
+    end
+    for i=1,255 do
+        local name,fn=debug.getupvalue(cb,i)
+        if not name then break end
+        if name=="set_joint" and fn==o.set_joint then
+            local function pose(go,sex,index,tree)
+                local selected=o.selected[index]
+                -- The owner's part_changed loop can see an empty slot list
+                -- during re-entry and retain the preceding wearer's selection.
+                if selected and o.parts[index] and not next(o.parts[index]) then
+                    o.selected[index]=nil
+                else
+                    local profile=selected and o.imports[selected]
+                    if type(profile)=="table" and not getmetatable(profile) then setmetatable(profile,sparse) end
+                end
+                local ok,rows=pcall(offsets,go,sex,index)
+                if not ok or not rows then return fn(go,sex,index,tree) end
+                local previous=o.shadow[sex]
+                o.shadow[sex]=rows
+                local applied,err=pcall(fn,go,sex,index,tree)
+                o.shadow[sex]=previous
+                if not applied then error(err,0) end
+            end
+            return debug.setupvalue(cb,i,pose)=="set_joint"
+        end
+    end
+    return false
+end
 
 local function actor_transforms(affected)
     local prefixes = {}
@@ -172,7 +245,9 @@ function M.install(pid)
                 if ok and candidate then
                     owner = candidate
                     finish()
-                    log.info("[MHRS-Files-HotReload] Connected to unmodified Lua Bone System: "..phase)
+                    local rests=install_rests(cb,owner)
+                    log.info("[MHRS-Files-HotReload] Connected to unmodified Lua Bone System: "..phase..
+                        (rests and " (per-hunter rest positions)" or ""))
                 end
             end
             return register(event, cb, ...)

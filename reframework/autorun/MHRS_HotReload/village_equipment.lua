@@ -1,11 +1,47 @@
 -- Let Rise construct the five worn parts together when their meshes and
--- physics change. The village hunter can be recreated at its current position.
+-- physics change. The game builds the replacement at the local hunter's position.
 local M = {}
 local shadow_skeleton = require("MHRS_HotReload.shadow_skeleton")
-local training_bow = require("MHRS_HotReload.training_bow")
-local mesh_type,chain_type = "via.render.Mesh","via.motion.Chain"
+local equipped_parts = require("MHRS_HotReload.equipped_parts")
+local equipped_hunter = require("MHRS_HotReload.equipped_hunter")
+local quest_context = require("MHRS_HotReload.quest_context")
+local mesh_type = "via.render.Mesh"
 local slots={0,1,2,3,4}
 local cancelled
+local session_pid,saved_recovery
+local recovery_path="MHRS-Files-HotReload/model-recovery.json"
+
+-- Reset Scripts discards all Lua objects while Rise may still be building the
+-- replacement. Carry only enough identity to restore control in this process.
+function M.install(pid)
+    session_pid=pid
+    local r=json.load_file(recovery_path)
+    if type(r)=="table" and r.pid==(pid or false) and type(r.expires)=="number" and
+            os.time()<=r.expires and r.expires<=os.time()+25 and type(r.manager)=="string" and
+            type(r.old_address)=="string" and (type(r.area)=="number" or (r.quest and r.quest.data)) and type(r.index)=="number" and
+            type(r.area_flag)=="number" and type(r.class)=="string" then
+        saved_recovery=r
+    end
+end
+
+local function save_recovery(tx,pm)
+    if not json or not json.dump_file then return end
+    local s=tx.gear
+    local r={pid=session_pid or false,manager=tostring(pm:get_address()),expires=os.time()+22,
+        index=tx.index,area=tx.area,quest=tx.quest,area_flag=tx.area_flag,class=tx.class,old_address=tx.old_address,
+        gear=s}
+    json.dump_file(recovery_path,r)
+    assert((json.load_file(recovery_path) or {}).old_address==r.old_address,"Could not record local hunter recovery")
+    tx.recovery=r
+end
+
+local function clear_recovery(tx)
+    if tx.recovery or tx==saved_recovery then
+        json.dump_file(recovery_path,{})
+        tx.recovery=nil
+        saved_recovery=nil
+    end
+end
 
 local function child(go,t)
     return go and go:call("getComponent(System.Type)",sdk.typeof(t))
@@ -20,44 +56,57 @@ local function scene(rebuild)
     local pm=sdk.get_managed_singleton("snow.player.PlayerManager")
     local p=pm and pm:call("findMasterPlayer")
     if not p then return end
-    local class=p:get_type_definition():get_full_name()
+    local td=p:get_type_definition()
+    local class=td:get_full_name()
     if class=="snow.player.PlayerLobbyBase" then
         return pm,p,p:call("get_GameObject")
     end
-    if class=="snow.player.Bow" then
+    if td:is_a("snow.player.PlayerQuestBase") then
+        local game=sdk.get_managed_singleton("snow.SnowGameManager")
+        local status=game and game:call("getStatus")
+        if status==2 then
+            if not p:call("get_IsInTrainingArea") then return pm,p,p:call("get_GameObject"),false,quest_context.read() end
+            return
+        end
+        if status~=1 then return end
         local area=sdk.get_managed_singleton("snow.VillageAreaManager")
         if area and area:call("getCurrentAreaNo")==5 and area:call("checkCurrentArea_TrainingArea") and
-                (p:call("get_IsInTrainingArea") or (rebuild and rebuild.training)) then
+                (p:call("get_IsInTrainingArea") or (rebuild and rebuild.gear and not rebuild.quest)) then
             return pm,p,p:call("get_GameObject"),true
         end
     end
 end
 
-local function ready(pm,p,go,training)
-    if cancelled or not go or not go:call("get_Valid") or not go:call("get_Draw") then return end
-    local area=sdk.get_managed_singleton("snow.VillageAreaManager")
-    if not area or not area:call("isIdle") then return end
+local function ready(pm,p,go,training,quest)
+    if cancelled or saved_recovery or not go or not go:call("get_Valid") or not go:call("get_Draw") then return end
+    local place=quest
+    if quest then
+        if not quest_context.available(quest,p) then return end
+    else
+        place=sdk.get_managed_singleton("snow.VillageAreaManager")
+        if not place or not place:call("isIdle") then return end
+    end
     local eq=sdk.get_managed_singleton("snow.data.EquipDataManager")
     if not eq then return end
     local index=pm:call("getMasterPlayerID")
     if not pm:call("isReadyPlayer",index) or not pm:call("isReadyPlayerLoadState") or
             not p:call("isActivePlayer") or not p:call("isInput") then return end
-    if training then
-        local s=training_bow.ready(p,go,index)
+    if training or quest then
+        local s=equipped_hunter.ready(pm,p,go,index,quest and quest.data)
         if not s then return end
-        return area,index,s
+        return place,index,s
     end
-    return area,index
+    return place,index
 end
 
 -- Only copy identities from the master's five worn parts. A hidden preview,
 -- another hunter, or a mesh with the same path in a new generation must
 -- never trigger a deferred model rebuild. No holder or GO survives this call.
 function M.worn_state(wanted)
-    local pm,p,go,training=scene()
+    local pm,p,go,training,quest=scene()
     local observed,available,owners={},{},{}
     if not go or not go:call("get_Valid") then return {observed=observed} end
-    local complete=ready(pm,p,go,training)~=nil
+    local complete=ready(pm,p,go,training,quest)~=nil
     for _,i in ipairs(slots) do
         local part=p:call("getPartsGameObject",i)
         if not part or not part:call("get_Valid") then complete=false
@@ -72,80 +121,18 @@ function M.worn_state(wanted)
             elseif mesh and not holder then complete=false end
         end
     end
-    return {ready=complete,observed=observed,available=available,training=training},owners
+    return {ready=complete,observed=observed,available=available,training=training,quest=quest~=nil},owners
 end
 
 function M.capture(candidates, physics, materials, shadow, missing)
-    local pm,p,go,training=scene()
-    local area,index,training_state=ready(pm,p,go,training)
-    if not area then return end
-    local by_object={}
-    for _,r in pairs(candidates) do by_object[r.go:get_address()]=r end
-    local tx={old=go,parts={},index=index,area=area:call("getCurrentAreaNo"),
-        area_flag=p:call("get_AreaMoveFlag"),shadow=shadow,training=training_state}
-    local impacted=false
-    for _,i in ipairs(slots) do
-        local part=p:call("getPartsGameObject",i)
-        if not part or not part:call("get_Valid") then return end
-        local mesh=child(part,mesh_type)
-        local mesh_path=mesh and path(mesh:call("getMesh"))
-        local mdf=mesh and path(mesh:call("get_Material"))
-        local chain=child(part,chain_type)
-        local chain_path=chain and path(chain:call("get_ChainAsset"))
-        local groups=chain_path and (physics.chains or {})[chain_path]
-        if groups==nil and chain_path then groups=chain:call("get_ResourceGroupCount") end
-        local row=by_object[part:get_address()]
-        if row then by_object[part:get_address()]=nil end
-        if row and not row.mesh.keep then impacted=true end
-        tx.parts[i]={name=part:call("get_Name"),mesh=mesh_path,mdf=mdf,chain=chain_path,
-            touched=row~=nil and not row.mesh.keep,before=row and row.mesh.original,
-            slots=(row and row.expected) or (mdf and materials[mdf]),
-            groups=type(groups)=="number" and groups or nil}
-    end
-    if impacted then return tx end
-end
-
-local function model_ready(tx,p,resources)
-    for _,i in ipairs(slots) do
-        local expected=tx.parts[i]
-        local go=p:call("getPartsGameObject",i)
-        if not go or not go:call("get_Valid") then return false,"Equipment part is being built" end
-        if go:call("get_Name")~=expected.name then return nil,"The player changed equipped items" end
-        local mesh=child(go,mesh_type)
-        if expected.mesh then
-            if not mesh or not mesh:call("get_MeshReady") or not mesh:call("get_MaterialReady") then
-                return false,"Equipment mesh is loading"
-            end
-            local mh,dh=mesh:call("getMesh"),mesh:call("get_Material")
-            if path(mh)~=expected.mesh or path(dh)~=expected.mdf then return false,"Equipment resource path changed" end
-            if expected.touched and resources then
-                for _,entry in ipairs({{expected.mesh,mh},{expected.mdf,dh}}) do
-                    local fresh=resources[entry[1]]
-                    if fresh and entry[2]:read_qword(0x10)~=fresh:get_address() then
-                        return false,"Equipment still uses an earlier resource: "..entry[1]
-                    end
-                end
-            end
-            if expected.slots then
-                if mesh:call("get_MaterialNum")~=#expected.slots then return false,"Material slot count changed" end
-                for j,name in ipairs(expected.slots) do
-                    if mesh:call("getMaterialName",j-1)~=name then return false,"Material slots differ: "..expected.mdf end
-                end
-            end
-        end
-        if expected.groups then
-            local chain=child(go,chain_type)
-            if not chain or path(chain:call("get_ChainAsset"))~=expected.chain or
-                    chain:call("get_ResourceGroupCount")~=expected.groups then
-                return false,"Physics resource groups differ: "..expected.chain
-            end
-            if chain:call("get_Enabled") and go:call("get_Update") and
-                    (not chain:call("get_Setuped") or chain:call("getGroupCount")~=expected.groups) then
-                return false,"Physics simulation is initializing: "..expected.chain
-            end
-        end
-    end
-    return true
+    local pm,p,go,training,quest=scene()
+    local place,index,gear=ready(pm,p,go,training,quest)
+    if not place then return end
+    local parts=equipped_parts.capture(p,candidates,physics,materials)
+    if not parts then return end
+    return {old=go,old_address=tostring(go:get_address()),class=p:get_type_definition():get_full_name(),
+        parts=parts,index=index,area=not quest and place:call("getCurrentAreaNo") or nil,quest=quest,
+        area_flag=p:call("get_AreaMoveFlag"),shadow=shadow,gear=gear}
 end
 
 local function request(eq,tx)
@@ -158,30 +145,59 @@ end
 
 -- A model created outside the equipment menu starts without the old
 -- hunter's area participation flag. It controls both rendering and input.
-local function resume_hunter(tx,pm,p,go,recovering)
-    local area=sdk.get_managed_singleton("snow.VillageAreaManager")
-    if not area or not area:call("isIdle") or area:call("getCurrentAreaNo")~=tx.area or
-            not go or go==tx.old or not go:call("get_Valid") or not p:call("isMasterPlayer") or
+local function resume_hunter(tx,pm,p,go,quest,recovering)
+    if tx.quest then
+        if not quest_context.same(tx.quest,quest) then return false,"Quest or stage changed" end
+    else
+        if quest then return false end
+        local area=sdk.get_managed_singleton("snow.VillageAreaManager")
+        if not area or not area:call("isIdle") or area:call("getCurrentAreaNo")~=tx.area then return false end
+        if tx.gear and not area:call("checkCurrentArea_TrainingArea") then return false end
+    end
+    if not go or tostring(go:get_address())==tx.old_address or not go:call("get_Valid") or
+            p:get_type_definition():get_full_name()~=tx.class or not p:call("isMasterPlayer") or
             pm:call("getMasterPlayerID")~=tx.index or not pm:call("isReadyPlayer",tx.index) or
             not pm:call("isReadyPlayerLoad") or not pm:call("isReadyPlayerLoadState") then return false end
-    if tx.new and tx.new~=go then return false end
-    if tx.training then
-        if p:get_type_definition():get_full_name()~="snow.player.Bow" or
-                not area:call("checkCurrentArea_TrainingArea") or p:call("getPlayerIndex")~=tx.index then return false end
-        if not training_bow.same_hunter(tx.training,training_bow.identity(p)) then
-            return false,"Waiting for the original training hunter data and bow"
+    if tx.new_address and tx.new_address~=tostring(go:get_address()) then return false end
+    if tx.gear then
+        if p:call("getPlayerIndex")~=tx.index then return false end
+        if not equipped_hunter.same_hunter(tx.gear,equipped_hunter.identity(p)) then
+            return false,"Waiting for the original local hunter data and weapon"
         end
     end
-    tx.new=go
+    tx.new_address=tostring(go:get_address())
     if not tx.resumed then
-        if p:call("get_AreaMoveFlag")~=tx.area_flag then p:call("setAreaMoveFlag",tx.area_flag) end
+        local flag=p:call("get_AreaMoveFlag")
+        if tx.quest then
+            -- Unlike the village, a quest owns its player lifecycle. First let
+            -- it restore its own control. Only a persistently hidden, inactive
+            -- replacement with the original equipped identities is eligible for
+            -- restoring the exact participation flag sampled before the request.
+            local draw,active,input=go:call("get_Draw"),p:call("isActivePlayer"),p:call("isInput")
+            if not (draw and active and input) then
+                tx.hidden_since=tx.hidden_since or os.clock()
+                if draw or active or input or os.clock()-tx.hidden_since<1 or flag==tx.area_flag or
+                        not quest_context.available(quest,p) or p:call("isWeaponOn") then return false end
+                local gui=sdk.get_managed_singleton("snow.gui.GuiManager")
+                if not gui or gui:call("IsPlayerAllInputDisable") or
+                        equipped_hunter.equip_indices(pm)~=tx.gear.indices then return false,"Waiting for the original quest equipment" end
+                p:call("setAreaMoveFlag",tx.area_flag)
+            end
+        elseif flag~=tx.area_flag then p:call("setAreaMoveFlag",tx.area_flag) end
         tx.resumed=true
+        local record=tx.recovery or (tx==saved_recovery and tx)
+        if record then
+            record.new_address=tx.new_address
+            record.resumed=true
+            json.dump_file(recovery_path,record)
+        end
         return false
     end
     if not (go:call("get_Draw") and p:call("isActivePlayer") and p:call("isInput")) then return false end
-    if tx.training and not recovering then
-        if not p:call("get_IsInTrainingArea") or p:call("isWeaponOn") then return false,"Training hunter has not returned to idle" end
-        local difference=training_bow.difference(tx.training,training_bow.read(p,go))
+    clear_recovery(tx)
+    if tx.gear and not recovering then
+        if (not tx.quest and not p:call("get_IsInTrainingArea")) or p:call("isWeaponOn") then return false,"Hunter has not returned to idle" end
+        local difference=equipped_hunter.difference(tx.gear,equipped_hunter.read(pm,p,go))
         if difference then return false,difference end
     end
     return true
@@ -206,43 +222,41 @@ local function skeleton_ready(tx,p,resources,scene_components)
     return not pending,"Waiting for the rebuilt hunter's rest skeleton"
 end
 
+local function location(tx)
+    if tx.quest then return ("quest %d on map %d"):format(tx.quest.no,tx.quest.map) end
+    if tx.gear then return "training area" end
+    return "village area "..tx.area
+end
+
 function M.advance(tx,resources,scene_components)
     resources=resources or tx.resources
-    local pm,p,go,training=scene(tx.started and tx or nil)
+    local pm,p,go,training,quest=scene(tx.started and tx or nil)
     if not tx.started then
-        local area,index,training_state=ready(pm,p,go,training)
-        if not area or go~=tx.old or index~=tx.index or area:call("getCurrentAreaNo")~=tx.area then
-            error("[village changed] Village hunter is no longer ready")
+        local place,index,gear=ready(pm,p,go,training,quest)
+        if not place or go~=tx.old or index~=tx.index or
+                (tx.quest and not quest_context.same(tx.quest,quest)) or
+                (not tx.quest and (quest or place:call("getCurrentAreaNo")~=tx.area)) then
+            error("[village changed] Local hunter is no longer ready in "..location(tx))
         end
-        if tx.training then
-            local changed=training_bow.difference(tx.training,training_state)
-            if changed then error("[village changed] "..changed) end
-            tx.training=training_state
+        if tx.gear then
+            local changed=equipped_hunter.difference(tx.gear,gear)
+            if changed then error("[village changed] "..changed.." ("..location(tx)..")") end
+            tx.gear=gear
             tx.area_flag=p:call("get_AreaMoveFlag")
         end
-        for _,i in ipairs(slots) do
-            local part=p:call("getPartsGameObject",i)
-            if not part or not part:call("get_Valid") or part:call("get_Name")~=tx.parts[i].name then
-                error("[village changed] Worn parts changed while preparing the model")
-            end
-            if tx.parts[i].touched then
-                local mesh=child(part,mesh_type)
-                local holder=mesh and mesh:call("getMesh")
-                if not holder or holder:read_qword(0x10)~=tx.parts[i].before then
-                    error("[village changed] Worn mesh already changed while preparing the model")
-                end
-            end
-        end
+        local unchanged,why=equipped_parts.unchanged(p,tx.parts)
+        if not unchanged then error("[village changed] "..why.." ("..location(tx)..")") end
         local eq=assert(sdk.get_managed_singleton("snow.data.EquipDataManager"))
+        save_recovery(tx,pm)
         tx.started=true
-        tx.deadline=os.clock()+7
+        tx.deadline=os.clock()+(tx.quest and 9 or 7)
         request(eq,tx)
         return true
     end
-    local resumed,reason=resume_hunter(tx,pm,p,go)
+    local resumed,reason=resume_hunter(tx,pm,p,go,quest)
     if resumed then
         local ready
-        ready,reason=model_ready(tx,p,resources)
+        ready,reason=equipped_parts.ready(p,tx.parts,resources)
         if ready and not tx.skeleton_done then
             ready,reason=skeleton_ready(tx,p,resources,scene_components)
             if ready then tx.repair=nil;tx.skeleton_done=true end
@@ -253,7 +267,9 @@ function M.advance(tx,resources,scene_components)
         end
         tx.stable=0
     end
-    if os.clock()>=tx.deadline then error("[live equipment rejected] "..(reason or "Village model not ready")) end
+    if os.clock()>=tx.deadline then
+        error("[live equipment rejected] "..(reason or "Local hunter model not ready").." ("..location(tx)..")")
+    end
     return true
 end
 
@@ -268,9 +284,16 @@ function M.abort(tx)
 end
 
 re.on_application_entry("UpdateBehavior",function()
-    if not cancelled then return end
-    local pm,p,go=scene(cancelled)
-    if resume_hunter(cancelled,pm,p,go,true) or os.clock()>=cancelled.cancel_deadline then cancelled=nil end
+    local tx=cancelled or saved_recovery
+    if not tx then return end
+    local pm,p,go,_,quest=scene(tx)
+    if (tx.cancel_deadline and os.clock()>=tx.cancel_deadline) or
+            (tx.expires and (os.time()>tx.expires or (pm and tostring(pm:get_address())~=tx.manager))) then
+        clear_recovery(tx)
+        cancelled=nil
+    elseif resume_hunter(tx,pm,p,go,quest,true) then
+        cancelled=nil
+    end
 end)
 
 return M

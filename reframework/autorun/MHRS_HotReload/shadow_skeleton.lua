@@ -15,8 +15,8 @@ local function scope(transform, sex, variants)
         end
         child = child:call("get_Next")
     end
-    local selected = suit and ("pl" .. suit)
-    return count == 5 and variants[selected] and selected or "bone"
+    local selected = count == 5 and ("pl" .. suit) or nil
+    return selected and variants[selected] and selected or "bone",selected
 end
 
 local function near(a,b)
@@ -78,7 +78,7 @@ function M.capture(player, targets)
     if not go or not go:call("get_Valid") or not go:call("get_Draw") then return nil,"Local hunter is not visible" end
     local tr=go and go:call("get_Transform")
     if not tr then return nil,"Local hunter transform is unavailable" end
-    local key=scope(tr,sex,variants)
+    local key,suit=scope(tr,sex,variants)
     local target=variants[key]
     if not target or not target.joints then return nil,target and target.deferred or "No target shadow skeleton" end
     local before={}
@@ -87,7 +87,7 @@ function M.capture(player, targets)
     local prefix="player/mod/"..sex.."/"
     local suffix="/"..sex.."_shadow.mesh"
     return {player=player,root=go,tr=tr,sex=sex,expected=target.joints,previous=before,changed=count,scope=key,
-            request=prefix..key..suffix,canonical=prefix.."bone"..suffix}
+            request=prefix..key..suffix,canonical=prefix.."bone"..suffix,suit_request=suit and (prefix..suit..suffix)}
 end
 
 -- Call with the new cached resource after the engine has accepted the
@@ -160,7 +160,12 @@ local function verify(tx, expected, bound, state)
 end
 
 function M.verify(tx)
-    return verify(tx,tx.expected,tx.fresh,tx.forward)
+    local ok,reason=verify(tx,tx.expected,tx.fresh,tx.forward)
+    if ok and tx.owner and not tx.rest_reported then
+        tx.rest_reported=true
+        require("MHRS_HotReload.lua_bone_system").rest_changed(tx.root)
+    end
+    return ok,reason
 end
 
 function M.abort(tx)
@@ -184,7 +189,12 @@ end
 
 function M.verify_rollback(tx)
     if not tx.reverse then return true end
-    return verify(tx,tx.previous,tx.original,tx.reverse)
+    local ok,reason=verify(tx,tx.previous,tx.original,tx.reverse)
+    if ok and not tx.reverse.rest_reported then
+        tx.reverse.rest_reported=true
+        require("MHRS_HotReload.lua_bone_system").rest_changed(tx.root)
+    end
+    return ok,reason
 end
 
 return M

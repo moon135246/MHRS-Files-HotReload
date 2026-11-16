@@ -4,6 +4,9 @@ local worn_armor = require("MHRS_HotReload.worn_armor")
 local worn_chain = require("MHRS_HotReload.worn_chain")
 local shadow_skeleton = require("MHRS_HotReload.shadow_skeleton")
 local equipment_physics = require("MHRS_HotReload.equipment_physics")
+local hunter_roster = require("MHRS_HotReload.hunter_roster")
+local peer_equipment = require("MHRS_HotReload.peer_equipment")
+local peer_physics = require("MHRS_HotReload.peer_physics")
 local kinds = {
     mesh={"via.render.Mesh","via.render.MeshResource","getMesh","setMesh"},
     chain={"via.motion.Chain","via.motion.ChainResource","get_ChainAsset","set_ChainAsset"},
@@ -76,13 +79,26 @@ local function gui_textures(comp,visit)
     end
 end
 
+local function hunter_asset(path,ext)
+    return (ext=="mesh" or ext=="mdf2" or ext=="chain") and path:lower():gsub("\\","/"):match("^@?player/mod/")
+end
+local function ordinary_owner(actors,go)
+    local owner=hunter_roster.owner(actors,go)
+    if owner.role=="master" or owner.role=="scene" then return owner.root:get_address() end
+end
 local function bindings(path,kind,ext,include_dormant,cache)
     local found={}
     local wanted=type(path)=="table" and path or {[path:lower()]=true}
+    local actors
     local function consider(b)
         local h=holder(b)
         local p=h and h:call("get_ResourcePath")
         if p and wanted[p:lower()] then
+            if not include_dormant and hunter_asset(p,ext) then
+                actors=actors or hunter_roster.read()
+                b.wearer=ordinary_owner(actors,b.comp:call("get_GameObject"))
+                if not b.wearer then return end
+            end
             b.old=h
             b.path=p
             if ext=="rtex" then b.slot_key=tostring(b.comp:get_address()).."/"..tostring(b.index) end
@@ -301,7 +317,7 @@ local function restore_when_ready(b)
         local h=holder(b)
         if h then
             deferred_materials[id]={mesh=b.comp,go=b.comp:call("get_GameObject"),
-                resource=h:read_qword(0x10),values=b.switches}
+                resource=h:read_qword(0x10),values=b.switches,wearer_owns=b.wearer_owns,wearer=b.wearer}
         end
     end
 end
@@ -309,6 +325,8 @@ re.on_application_entry("UpdateBehavior",function()
     for id,entry in pairs(deferred_materials) do
         local ok,finished=pcall(function()
             if not entry.go:call("get_Valid") then return true end
+            if entry.wearer_owns and not entry.wearer_owns(entry.go) then return true end
+            if entry.wearer and ordinary_owner(hunter_roster.read(),entry.go)~=entry.wearer then return true end
             local h=entry.mesh:call("get_Material")
             if not h or h:read_qword(0x10)~=entry.resource then return true end
             if entry.mesh:call("get_MaterialReady") then
@@ -911,6 +929,8 @@ local function release_equipment()
     if equipment_batch then
         local batch=equipment_batch
         equipment_batch=nil
+        peer_equipment.abort(batch.peers,restore_when_ready)
+        peer_physics.abort(batch.peer_physics,restore_when_ready)
         restored,reason=pcall(worn_armor.abort,batch,restore_when_ready)
     end
     for _,resource in pairs(equipment_refs) do resource:release() end
@@ -976,11 +996,16 @@ local function equipment_factories(wanted,visit)
 end
 local function awakened(done)
     local ready={}
+    local actors
     for path,entries in pairs(sleeping) do
         for i=#entries,1,-1 do
             local b=entries[i]
             local ok,state=pcall(function()
                 if not b.go:call("get_Valid") then return "drop" end
+                if b.wearer then
+                    actors=actors or hunter_roster.read()
+                    if ordinary_owner(actors,b.go)~=b.wearer then return "drop" end
+                end
                 if not b.go:call("get_Update") then return "sleep" end
                 if done[path] then return "drop" end
                 local h=holder(b)
@@ -1002,6 +1027,8 @@ function M.reset(native)
     for _,resource in pairs(platform_pins) do resource:release() end
     platform_pins={}
     equipment_physics.reset()
+    peer_equipment.reset()
+    peer_physics.reset()
     armor_instances,armor_origins={},{}
     gui_scan=nil
     for group in pairs(prefab_generations) do group.resource:release() end
@@ -1010,6 +1037,15 @@ function M.reset(native)
     cleanup_cursor=0
 end
 function M.run(action,req,native)
+    if action=="asset_hunter_roster" then
+        return {hunters=hunter_roster.describe(hunter_roster.read()),peer_last_events=peer_equipment.status(),
+            peer_physics_events=peer_physics.status()}
+    end
+    if action=="asset_peer_meshes" then
+        local wanted={}
+        for _,path in ipairs(req.paths or {}) do wanted[path:lower()]=true end
+        return {paths=hunter_roster.mesh_paths(wanted)}
+    end
     if action=="asset_gui_ready" then
         local wanted,found,assets={},{},{}
         for path,names in pairs(req.owners) do
@@ -1074,10 +1110,16 @@ function M.run(action,req,native)
                 else warming[key]=nil end
             end
         end
-        if equipment_batch and not equipment_pending and
-                (not equipment_batch.village or not next(warming)) then
+        if equipment_batch and not equipment_pending and (not equipment_batch.village or not next(warming)) then
             local batch=equipment_batch
-            local ok,pending=pcall(worn_armor.advance,batch,scene_components,equipment_refs,material_state,restore_when_ready)
+            local ok,pending=pcall(function()
+                local peers=peer_equipment.advance(batch.peers,scene_components,equipment_refs,material_state,restore_when_ready)
+                local physics=peer_physics.advance(batch.peer_physics,scene_components,equipment_refs,material_state,restore_when_ready)
+                if not batch.local_done then
+                    batch.local_done=not worn_armor.advance(batch,scene_components,equipment_refs,material_state,restore_when_ready)
+                end
+                return peers or physics or not batch.local_done
+            end)
             if not ok or not pending then
                 if ok then
                     if batch.physics then batch.physics:commit() end
@@ -1091,6 +1133,7 @@ function M.run(action,req,native)
                     for name,res in pairs(equipment_refs) do
                         local key=name:lower()
                         if key:match("%.mesh$") then
+                            peer_equipment.generation(key,res:get_address(),(batch.peer_meshes or {})[key])
                             local loose=batch.loose[key] or batch.loose[key:gsub("%.mesh$",".chain")] or false
                             updated[key]=updated[key] or {}
                             updated[key][res:get_address()]=loose
@@ -1101,6 +1144,10 @@ function M.run(action,req,native)
                         platform_pins[name]=equipment_refs[name]
                         equipment_refs[name]=nil
                     end
+                end
+                if not ok then
+                    peer_equipment.abort(batch.peers,restore_when_ready)
+                    peer_physics.abort(batch.peer_physics,restore_when_ready)
                 end
                 equipment_batch=nil
                 release_equipment()
@@ -1116,6 +1163,7 @@ function M.run(action,req,native)
         release_equipment()
         local names,seen,by_ext={},{},{}
         local warm,dormant={},{}
+        local dormant_actors
         local equipment,retiring_visuals,preview_targets={},{},{}
         local physics_spec=req.physics or {}
         local physics
@@ -1141,7 +1189,7 @@ function M.run(action,req,native)
         local waiting,pause_hunter,retry_owners,training_rebuild
         if armor_mesh_requested then
             local state,owners=require("MHRS_HotReload.village_equipment").worn_state(live)
-            training_rebuild=state.training and next(state.observed)~=nil
+            training_rebuild=(state.training or state.quest) and next(state.observed)~=nil
             if req.worn_retry then
                 retry_owners=owners
                 assert(state.ready,"[village changed] Hunter is not ready for the queued change")
@@ -1221,8 +1269,15 @@ function M.run(action,req,native)
                             owner.address=tostring(owner.old:read_qword(0x10))
                             owner.go=go
                             owner.old=nil
-                            dormant[key]=dormant[key] or {}
-                            dormant[key][#dormant[key]+1]=owner
+                            local hunter=hunter_asset(key,ext)
+                            if hunter then
+                                dormant_actors=dormant_actors or hunter_roster.read()
+                                owner.wearer=ordinary_owner(dormant_actors,go)
+                            end
+                            if not hunter or owner.wearer then
+                                dormant[key]=dormant[key] or {}
+                                dormant[key][#dormant[key]+1]=owner
+                            end
                         end
                     end
                 end
@@ -1272,10 +1327,28 @@ function M.run(action,req,native)
             end
         end
         local chains,village
+        local peer_tasks,peer_receipt=peer_equipment.partition(armor_candidates,live,req,function(row,id)
+            return not worn_armor.needs_reentry(row,armor_instances[id],armor_origins,startup)
+        end)
+        if #peer_tasks>0 then
+            for _,t in ipairs(peer_tasks) do
+                if type(t.groups)=="number" and not (req.missing or {})[t.chain] then
+                    add_path(t.chain)
+                    equipment[t.chain]=kinds.chain[2]
+                end
+            end
+        end
+        armor_count=0
+        for _ in pairs(armor_candidates) do armor_count=armor_count+1 end
         local chain_components={}
+        local peer_effects,chain_actors
         local rebuild=false
-        if next(armor_candidates) or shadow or next(physics_spec.chains or {}) then
+        if next(armor_candidates) or next(req.shadow_skeletons or {}) or next(physics_spec.chains or {}) then
             chain_components=scene_components("via.motion.Chain",components_by_type)
+            peer_effects,chain_components,chain_actors=peer_physics.capture(chain_components,req,live,equipment,function(path,ext)
+                add_path(path)
+                equipment[path]=kinds[ext][2]
+            end)
         end
         if next(armor_candidates) then
             local pm=sdk.get_managed_singleton("snow.player.PlayerManager")
@@ -1293,6 +1366,10 @@ function M.run(action,req,native)
             end
             chains=worn_chain.capture(chain_components,
                 protected,physics_spec.chains or {},req.missing or {},equipment,physics_spec.chain_terminals or {})
+            for _,row in ipairs(chains and chains.rows or {}) do
+                local wearer=hunter_roster.owner(chain_actors,row.go)
+                if wearer.role=="master" or wearer.role=="scene" then row.wearer_owns=hunter_roster.guard(wearer) end
+            end
             if shadow and not (chains and chains:covers(protected.shadow)) then
                 shadow_reason="Could not observe the hunter's attached physics"
                 shadow=nil
@@ -1347,7 +1424,7 @@ function M.run(action,req,native)
                 end
             end
         end
-        if next(equipment) or physics or chains or village then
+        if next(equipment) or physics or chains or village or (peer_effects and #peer_effects>0) then
             local ok,batch=pcall(request_equipment,equipment,platform,req.expected_materials or {})
             if not ok then release_equipment();error(batch) end
             if physics then
@@ -1356,6 +1433,9 @@ function M.run(action,req,native)
                 batch.physics=physics
             end
             batch.candidates=armor_candidates
+            batch.peers=peer_tasks
+            batch.peer_physics=peer_effects
+            batch.peer_meshes=req.peer_meshes
             if armor_mesh_requested and next(armor_candidates) then batch.mesh_changes=live end
             batch.chains=chains
             batch.village=village
@@ -1408,7 +1488,7 @@ function M.run(action,req,native)
         counts:close()
         return {results=results,factories=factory_count,equipment=equipment_pending,
             equipment_bindings=deferred_paths and 0 or armor_count,deferred_equipment=deferred_paths,
-            waiting_equipment=waiting,shadow_deferred=shadow_reason,sleeping=next(sleeping)~=nil,
+            waiting_equipment=waiting,peer_equipment=peer_receipt,shadow_deferred=shadow_reason,sleeping=next(sleeping)~=nil,
             preview_targets=preview_targets}
     end
     if action=="asset_prefab_forget" then prefab_values[req.path:lower()]=nil;return {} end
@@ -1523,9 +1603,14 @@ function M.run(action,req,native)
         if not job then return {state="idle"} end
         local restore_error
         if job.effects or job.chains then
+            local actors
             for _,b in ipairs(job.effects or job.chains) do
                 local ok,err=pcall(function()
                     local go=b.comp:call("get_GameObject")
+                    if b.wearer then
+                        actors=actors or hunter_roster.read()
+                        if ordinary_owner(actors,go)~=b.wearer then return end
+                    end
                     if go and go:call("get_Valid") and
                             (not job.chains or tostring(holder(b):read_qword(0x10))==job.fresh) then
                         assign(b,b.old)
@@ -1699,4 +1784,6 @@ function M.run(action,req,native)
     end
     return {state=state,address=address,bindings=#list}
 end
+re.on_application_entry("UpdateBehavior",peer_equipment.tick)
+re.on_application_entry("UpdateBehavior",peer_physics.tick)
 return M

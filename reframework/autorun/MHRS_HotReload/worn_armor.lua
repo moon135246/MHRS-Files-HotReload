@@ -111,6 +111,7 @@ end
 
 local function live(row)
     return row.go:call("get_Valid") and row.comp:call("get_GameObject") == row.go
+        and (not row.wearer_owns or row.wearer_owns(row.go))
 end
 
 local function current(row, ext)
@@ -125,7 +126,7 @@ local function restore(row, restore_when_ready)
     end
     assert(current(row, "mesh") == row.mesh.original and current(row, "mdf2") == row.mdf2.original,
         "Could not restore equipment holders")
-    restore_when_ready({comp=row.comp, kind=row.mdf2.kind, switches=row.rollback_material})
+    restore_when_ready({comp=row.comp, kind=row.mdf2.kind, switches=row.rollback_material,wearer_owns=row.wearer_owns})
 end
 
 local function restore_chains(batch, failures)
@@ -398,7 +399,7 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
         end
         for _, row in ipairs(batch.touched) do
             if live(row) and row.go:call("get_Update") then
-                restore_when_ready({comp=row.comp, kind=row.mdf2.kind, switches=row.switches})
+                restore_when_ready({comp=row.comp, kind=row.mdf2.kind, switches=row.switches,wearer_owns=row.wearer_owns})
             end
         end
         return false

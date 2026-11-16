@@ -17,7 +17,8 @@ local function current(row)
 end
 
 local function live(row)
-    return row.go:call("get_Valid") and row.comp:call("get_GameObject") == row.go
+    return row.go:call("get_Valid") and row.comp:call("get_GameObject")==row.go
+        and (not row.wearer_owns or row.wearer_owns(row.go))
 end
 
 local function owned(row)
