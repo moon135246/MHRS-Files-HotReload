@@ -54,6 +54,21 @@ local function scene_scope(status)
         return a and table.concat({"quest",q:call("getQuestNo"),q:call("getMapNo"),a:get_address()},"/")
     end
 end
+
+-- During deferred object destruction a material slot may still point at the
+-- departing part. Read only session identity until the new slot is registered.
+function M.context()
+    local gm=sdk.get_managed_singleton("snow.SnowGameManager")
+    local status=gm and gm:call("getStatus")
+    return scene_scope(status),members(status)
+end
+
+-- The mount transaction must not resolve a material slot to its GameObject
+-- while Rise is destroying the previous part. Enumerate only the players.
+function M.players(pm)
+    local list=pm:get_field("PlayerList")
+    return list and items(list)
+end
 local function scan(out)
     local pm=sdk.get_managed_singleton("snow.player.PlayerManager")
     local gm=sdk.get_managed_singleton("snow.SnowGameManager")

@@ -1,22 +1,28 @@
 -- Select the local hunter's normal or complete-first-natives-equipment shadow.
 -- Retire/reload the resource before passing the new MeshResource to bind().
 local M = {}
-local armor = {arm=true, body=true, helm=true, leg=true, wst=true}
+local slots={"body","arm","wst","leg","helm"}
 
-local function scope(transform, sex, variants)
-    local piece, count, suit = {}, 0, nil
-    local child = transform:call("get_Child")
-    while child do
-        local name = child:call("get_GameObject"):call("get_Name"):lower()
-        local part, number = name:match("^" .. sex .. "_([a-z]+)(%d+)$")
-        if armor[part] then
-            if piece[part] or (suit and suit ~= number) then return "bone" end
-            piece[part], suit, count = true, number, count + 1
-        end
-        child = child:call("get_Next")
+local function scope(player, transform, sex, variants)
+    local suit,matched=nil,true
+    for i,part in ipairs(slots) do
+        -- During a factory swap the departing and incoming parts may both
+        -- be children of this Transform. Only the registered slot is worn.
+        local go=player:call("getPartsGameObject",i-1)
+        if not go or not go:call("get_Valid") then return nil,"Equipment slot unavailable: "..part end
+        local tr=go:call("get_Transform")
+        if not tr or tr:call("get_Parent")~=transform then return nil,"Equipment slot left hunter: "..part end
+        local number=go:call("get_Name"):lower():match("^"..sex.."_"..part.."(%d+)$")
+        if not number or (suit and number~=suit) then matched=false end
+        suit=suit or number
     end
-    local selected = count == 5 and ("pl" .. suit) or nil
+    local selected=matched and suit and ("pl"..suit) or nil
     return selected and variants[selected] and selected or "bone",selected
+end
+
+local function intact(tx)
+    return tx.root:call("get_Valid") and tx.player:call("get_GameObject")==tx.root
+        and tx.root:call("get_Transform")==tx.tr and (not tx.owns_root or tx.owns_root())
 end
 
 local function near(a,b)
@@ -25,17 +31,21 @@ end
 
 -- Validate names and parent links before touching the root's owner. Report
 -- actual rest positions; a change to the animation pose alone cannot pass.
-local function inspect(tr, expected, snapshot)
+local function inspect(tr, expected, snapshot,tx)
     local found, changed = {}, 0
+    if tx then tx.api="Transform.get_Joints" end
     for _,joint in pairs(tr:call("get_Joints")) do
+        if tx then tx.api="Joint.get_Name" end
         local name = joint:call("get_Name")
         local row = expected[name]
         if not row then return nil, "Unexpected live shadow joint: "..tostring(name) end
+        if tx then tx.api=name.." Joint.get_Parent" end
         local parent = joint:call("get_Parent")
         if found[name] or (parent and parent:call("get_Name") or "") ~= row.parent then
             return nil, "Different or duplicate live shadow joint: " .. name
         end
         found[name] = true
+        if tx then tx.api=name.." Joint.get_BaseLocalPosition" end
         local pos=joint:call("get_BaseLocalPosition")
         if snapshot then snapshot[name]={parent=row.parent,position={pos.x,pos.y,pos.z}} end
         if not near(pos,row.position) then changed = changed + 1 end
@@ -78,9 +88,12 @@ function M.capture(player, targets)
     if not go or not go:call("get_Valid") or not go:call("get_Draw") then return nil,"Local hunter is not visible" end
     local tr=go and go:call("get_Transform")
     if not tr then return nil,"Local hunter transform is unavailable" end
-    local key,suit=scope(tr,sex,variants)
+    local key,suit=scope(player,tr,sex,variants)
+    if not key then return nil,suit end
     local target=variants[key]
-    if not target or not target.joints then return nil,target and target.deferred or "No target shadow skeleton" end
+    if not target or not target.joints then
+        return nil,target and target.deferred and ("[normal equip] "..target.deferred) or "No target shadow skeleton"
+    end
     local before={}
     local count,reason=inspect(tr,target.joints,before)
     if count==nil then return nil,reason end
@@ -94,7 +107,8 @@ end
 -- requested generation. Keep a separate rollback holder across later frames.
 function M.bind(tx,resource)
     if tx.changed==0 then return true end
-    if not tx.root:call("get_Valid") or tx.player:call("get_GameObject")~=tx.root then return nil,"Local hunter changed" end
+    tx.api="root and motion ownership"
+    if not intact(tx) then return nil,"Local hunter changed" end
     -- A hunter's shadow mesh is on the same root GO as the 79-joint
     -- transform. A child of this root might instead be a face or weapon.
     local mesh=tx.root:call("getComponent(System.Type)",sdk.typeof("via.render.Mesh"))
@@ -104,6 +118,7 @@ function M.bind(tx,resource)
     if not motion or not motion:call("get_JointsConstructed") then return nil,"Hunter motion skeleton is not constructed" end
     local before=previous:read_qword(0x10)
     if not before or before==0 then return nil,"The current shadow mesh has no resource" end
+    tx.api="pin current and new shadow mesh"
     local old=sdk.to_resource(sdk.to_ptr(before))
     -- REFramework's global holders pin their managed wrappers across frames.
     local original=old and old:create_holder_global("via.render.MeshResourceHolder")
@@ -117,14 +132,18 @@ function M.bind(tx,resource)
     -- still match the selected file's complete skeleton.
     if path~=tx.request and path~=tx.canonical then return nil,"Unexpected new shadow resource: "..path end
     if next_holder:read_qword(0x10)==before then return nil,"Shadow resource generation is unchanged" end
+    tx.api="inspect attached CHAIN before binding"
+    if tx.can_change and not tx.can_change() then return nil,"Attached hunter physics changed before binding the shadow" end
     tx.owner,tx.original,tx.fresh={go=tx.root,mesh=mesh,motion=motion},original,next_holder
     tx.forward={samples=0}
+    tx.api="via.render.Mesh.setMesh "..path
     mesh:call("setMesh",next_holder)
     return true
 end
 
 local function verify(tx, expected, bound, state)
-    if not tx.root:call("get_Valid") or tx.player:call("get_GameObject")~=tx.root or tx.root:call("get_Transform")~=tx.tr then
+    tx.api="root mesh and motion ownership"
+    if not intact(tx) then
         return nil,"Local hunter changed"
     end
     if not tx.root:call("get_Draw") then return false,"Local hunter is not visible" end
@@ -138,7 +157,7 @@ local function verify(tx, expected, bound, state)
             return nil,"Hunter motion component changed"
         end
     end
-    local remaining,reason=inspect(tx.tr,expected)
+    local remaining,reason=inspect(tx.tr,expected,nil,tx)
     -- Rebuilding the render owner can make the joint list transiently empty
     -- after MeshReady. The caller bounds retries to its transaction deadline.
     if not remaining then return false,reason end
@@ -152,7 +171,10 @@ local function verify(tx, expected, bound, state)
         -- exact name exposed by Rise's via.motion.Motion. Do not repeat it
         -- or assume it worked until a later frame reads all rest positions.
         if state.samples>2 and not state.reset then
+            tx.api="inspect attached CHAIN before motion reset"
+            if tx.can_change and not tx.can_change() then return nil,"Attached hunter physics changed before resetting Motion" end
             state.reset=true
+            tx.api="via.motion.Motion.resetSekeleton"
             tx.owner.motion:call("resetSekeleton")
         end
     end
@@ -169,10 +191,11 @@ function M.verify(tx)
 end
 
 function M.abort(tx)
-    if not tx.owner or not tx.owner.go:call("get_Valid") or tx.player:call("get_GameObject")~=tx.root then return true end
+    if not tx.owner or not intact(tx) then return true end
     local comp=tx.owner.mesh
     local holder=comp:call("get_GameObject")==tx.owner.go and comp:call("getMesh")
     if holder and holder:read_qword(0x10)==tx.fresh:read_qword(0x10) then
+        if tx.can_change and not tx.can_change() then return false,false end
         tx.reverse={samples=0}
         comp:call("setMesh",tx.original)
         local restored=comp:call("getMesh")

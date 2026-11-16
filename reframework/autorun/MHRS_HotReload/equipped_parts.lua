@@ -33,10 +33,13 @@ function M.capture(p,candidates,physics,materials)
         if row then by_object[part:get_address()]=nil end
         if row and not row.mesh.keep then impacted=true end
         parts[i]={name=part:call("get_Name"),object=part:get_address(),mesh=mesh_path,mdf=mdf,chain=chain_path,
-            touched=row~=nil and not row.mesh.keep,before=row and row.mesh.original,
+            touched=row~=nil and not row.mesh.keep,requested=row~=nil,before=row and row.mesh.original,
             mesh_name=row and row.mesh.path,mdf_name=row and row.mdf2 and row.mdf2.path,
             slots=(row and row.expected) or (mdf and materials[mdf]),
-            groups=type(groups)=="number" and groups or nil}
+            helmet=mesh_path and (physics.helmets or {})[(mesh_path:gsub("%.mesh$",".user"))],
+            groups=type(groups)=="number" and groups or nil,
+            incoming_chain=mesh_path and (physics.chains or {})[(mesh_path:gsub("%.mesh$",".chain"))],
+            terminals=mesh_path and (physics.chain_terminals or {})[(mesh_path:gsub("%.mesh$",".chain"))]}
     end
     if impacted then return parts end
 end

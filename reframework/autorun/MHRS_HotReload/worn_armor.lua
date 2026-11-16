@@ -223,6 +223,10 @@ local function finish_recovery(batch, reason)
     end
 end
 
+function M.recovery_pending(batch)
+    return recovering[batch]~=nil
+end
+
 function M.update_recoveries()
     for batch,state in pairs(recovering) do
         local ok,ready,reason=pcall(shadow_skeleton.verify_rollback,batch.shadow)
@@ -441,21 +445,32 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
     end
     if not next(batch.candidates) and not batch.physics and not batch.chains and not batch.shadow then return false end
     local synchronous = not batch.touched
-    local ok, pending = pcall(function()
+    local function context(err)
+        local action=batch.action or "worn resources"
+        if (action=="bind shadow" or action=="verify shadow") and batch.shadow then
+            action=action.." "..tostring(batch.shadow.api or batch.shadow.request)
+        elseif batch.chains and batch.chains.current_path then action=action.." "..batch.chains.current_path end
+        return debug.traceback(action..": "..tostring(err),2)
+    end
+    local ok, pending = xpcall(function()
         if batch.chains and not batch.chains_paused then
+            batch.action="stage CHAIN"
             batch.chains:stage(resources)
             batch.chains_paused=true
+            batch.action="pause CHAIN"
             batch.chains:pause()
             return true
         end
         if batch.shadow then
             if not batch.shadow_bound then
+                batch.action="bind shadow"
                 batch.shadow_bound=true
                 assert(shadow_skeleton.bind(batch.shadow,resources[batch.shadow.request]))
                 batch.shadow_deadline=os.clock()+3
                 return true
             end
             if not batch.shadow_ready then
+                batch.action="verify shadow"
                 local ready, reason=shadow_skeleton.verify(batch.shadow)
                 if not ready then
                     assert(ready~=nil and os.clock()<batch.shadow_deadline,reason)
@@ -512,16 +527,19 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
         end
         if batch.chains then
             if not batch.chain_bound then
+                batch.action="bind CHAIN"
                 batch.chains:bind()
                 batch.chain_bound=true
                 return true
             end
             if not batch.chain_resumed then
+                batch.action="resume CHAIN"
                 batch.chains:resume()
                 batch.chain_resumed=true
                 batch.chain_deadline=os.clock()+4
                 return true
             end
+            batch.action="verify CHAIN"
             local ready, reason=batch.chains:verify()
             if not ready then
                 assert(os.clock()<batch.chain_deadline,reason)
@@ -534,7 +552,7 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
             end
         end
         return false
-    end)
+    end,context)
     if not ok then
         local applied=batch.chains_paused or batch.shadow_bound
         local restored, failure = pcall(M.abort, batch, restore_when_ready, synchronous)

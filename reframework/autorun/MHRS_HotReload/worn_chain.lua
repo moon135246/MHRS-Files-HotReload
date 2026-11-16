@@ -135,6 +135,7 @@ end
 
 function Chain:stage(resources)
     for _,row in ipairs(self.rows) do
+        self.current_path=row.path
         if live(row) and current(row) == row.original then
             row.enabled = row.comp:call("get_Enabled")
             row.frozen = row.comp:call("get_FreezePose")
@@ -159,6 +160,7 @@ end
 
 function Chain:pause()
     for _,row in ipairs(self.rows) do
+        self.current_path=row.path
         if row.enabled ~= nil and live(row) and current(row) == row.original then
             row.paused = true -- record ownership before a possibly failing setter
             if row.owners then freeze(row, true) end
@@ -170,9 +172,11 @@ function Chain:bind()
     -- Validate every part before the first setter so a partial outfit
     -- copy cannot bind a foreign terminal, even on a different row.
     for _,row in ipairs(self.rows) do
+        self.current_path=row.path
         if row.paused and owned(row) then check_joints(row) end
     end
     for _,row in ipairs(self.rows) do
+        self.current_path=row.path
         if row.paused and owned(row) then
             if row.owners then
                 assert(row.comp:call("get_FreezePose"), "Chain resumed during equipment change: " .. row.path)
@@ -190,6 +194,7 @@ end
 
 function Chain:resume()
     for _,row in ipairs(self.rows) do
+        self.current_path=row.path
         if row.paused and row.owners and owned(row) then
             freeze(row, row.frozen)
         end
@@ -198,6 +203,7 @@ end
 
 function Chain:verify()
     for _,row in ipairs(self.rows) do
+        self.current_path=row.path
         if row.paused and live(row) then
             local id = current(row)
             -- A replacement supplied by a later real equip owns the part.
