@@ -202,6 +202,12 @@ function M.generation(path,address,compatible)
     known[path]=compatible and {[address]=true} or {}
 end
 
+function M.stock_layout(path,address,initial_stock)
+    local observed=known[path]
+    if observed then return observed[address]==true end
+    return initial_stock
+end
+
 function M.tick()
     if not next(waiting) or os.clock()<next_check then return end
     next_check=os.clock()+1

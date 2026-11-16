@@ -239,12 +239,16 @@ local variable_access={
 }
 
 local function material_state(mesh,policy)
-    local result={}
+    local result,parts,pins={}
+    if policy=="vertices" then
+        parts,pins={},{}
+        for i=0,mesh:call("getPartsEnableCount")-1 do parts[i+1]=mesh:call("getPartsEnable",i) end
+    end
     for i=0,mesh:call("get_MaterialNum")-1 do
         local name=mesh:call("getMaterialName",i)
         local slot={enabled=mesh:call("getMaterialsEnable",i),variables={},textures={}}
         result[name]=slot
-        local keep=policy==true or (policy and policy[name])
+        local keep=parts~=nil or policy==true or (policy and policy[name])
         if keep then
             for j=0,mesh:call("getMaterialVariableNum",i)-1 do
                 local key=mesh:call("getMaterialVariableName",i,j)
@@ -258,15 +262,32 @@ local function material_state(mesh,policy)
             for j=0,mesh:call("getMaterialTextureNum",i)-1 do
                 local key=mesh:call("getMaterialTextureName",i,j)
                 if keep==true or keep.textures[key] then
-                    slot.textures[key]={holder=mesh:call("getMaterialTexture",i,j)}
+                    local h=mesh:call("getMaterialTexture",i,j)
+                    if parts and h then
+                        local ptr=h:read_qword(0x10)
+                        if ptr~=0 then
+                            if not pins[ptr] then
+                                local r=assert(sdk.to_resource(sdk.to_ptr(ptr)))
+                                pins[ptr]=assert(r:create_holder_global("via.render.TextureResourceHolder"))
+                                assert(pins[ptr]:read_qword(0x10)==ptr,"Could not retain worn texture")
+                            end
+                            h=pins[ptr]
+                        end
+                    end
+                    slot.textures[key]={holder=h}
                 end
             end
         end
     end
-    return result
+    return result,parts
 end
 
-local function restore_material(mesh,prior)
+local function restore_material(mesh,prior,parts)
+    if parts and #parts==mesh:call("getPartsEnableCount") then
+        for i,enabled in ipairs(parts) do
+            if mesh:call("getPartsEnable",i-1)~=enabled then mesh:call("setPartsEnable",i-1,enabled) end
+        end
+    end
     for i=0,mesh:call("get_MaterialNum")-1 do
         local slot=prior[mesh:call("getMaterialName",i)]
         if slot then
@@ -274,7 +295,15 @@ local function restore_material(mesh,prior)
             for j=0,mesh:call("getMaterialVariableNum",i)-1 do
                 local saved=slot.variables[mesh:call("getMaterialVariableName",i,j)]
                 if saved and saved.kind==mesh:call("getMaterialVariableType",i,j) then
-                    mesh:call(variable_access[saved.kind][2],i,j,saved.value)
+                    local same=false
+                    if parts then
+                        local value=mesh:call(variable_access[saved.kind][1],i,j)
+                        local old=saved.value
+                        if saved.kind==4 then
+                            same=value.x==old.x and value.y==old.y and value.z==old.z and value.w==old.w
+                        else same=value==old end
+                    end
+                    if not same then mesh:call(variable_access[saved.kind][2],i,j,saved.value) end
                 end
             end
             for j=0,mesh:call("getMaterialTextureNum",i)-1 do
@@ -309,15 +338,16 @@ local function current_geometry(comp)
 end
 local function restore_when_ready(b)
     if not b.switches then return end
+    if b.parts and b.wearer_owns and not b.wearer_owns(b.comp:call("get_GameObject")) then return end
     local id=b.comp:get_address()
     deferred_materials[id]=nil
     if b.comp:call("get_MaterialReady") then
-        restore_material(b.comp,b.switches)
+        restore_material(b.comp,b.switches,b.parts)
     else
         local h=holder(b)
         if h then
             deferred_materials[id]={mesh=b.comp,go=b.comp:call("get_GameObject"),
-                resource=h:read_qword(0x10),values=b.switches,wearer_owns=b.wearer_owns,wearer=b.wearer}
+                resource=h:read_qword(0x10),values=b.switches,parts=b.parts,wearer_owns=b.wearer_owns,wearer=b.wearer}
         end
     end
 end
@@ -330,7 +360,7 @@ re.on_application_entry("UpdateBehavior",function()
             local h=entry.mesh:call("get_Material")
             if not h or h:read_qword(0x10)~=entry.resource then return true end
             if entry.mesh:call("get_MaterialReady") then
-                restore_material(entry.mesh,entry.values)
+                restore_material(entry.mesh,entry.values,entry.parts)
                 return true
             end
         end)
@@ -1044,7 +1074,8 @@ function M.run(action,req,native)
     if action=="asset_peer_meshes" then
         local wanted={}
         for _,path in ipairs(req.paths or {}) do wanted[path:lower()]=true end
-        return {paths=hunter_roster.mesh_paths(wanted)}
+        local peers,master=hunter_roster.mesh_paths(wanted)
+        return {paths=peers,master=master}
     end
     if action=="asset_gui_ready" then
         local wanted,found,assets={},{},{}
@@ -1117,16 +1148,29 @@ function M.run(action,req,native)
                 local physics=peer_physics.advance(batch.peer_physics,scene_components,equipment_refs,material_state,restore_when_ready)
                 if not batch.local_done then
                     batch.local_done=not worn_armor.advance(batch,scene_components,equipment_refs,material_state,restore_when_ready)
+                elseif batch.vertex_fallback and not batch.village and not worn_armor.vertices_ready(batch) then
+                    return true
                 end
                 return peers or physics or not batch.local_done
             end)
             if not ok or not pending then
                 if ok then
                     if batch.physics then batch.physics:commit() end
+                    if batch.village and batch.stock_meshes and next(batch.stock_meshes) then
+                        local recorded,why=pcall(worn_armor.remember_stock,batch,hunter_roster.read(),equipment_refs,armor_instance)
+                        if recorded then log.info(("[MHRS-Files-HotReload] Recorded %d restored worn PAK meshes"):format(why))
+                        else log.warn("[MHRS-Files-HotReload] Worn PAK source unavailable: "..tostring(why)) end
+                    end
                     for _,row in ipairs(batch.touched or {}) do
                         if row.mesh.fresh~=row.mesh.original then
                             local entry=armor_instance(row.comp:get_address(),row.go)
                             entry.direct,entry.defer=row.mesh.fresh,nil
+                            entry.queued_vertex=nil
+                            entry.stock=nil
+                            if row.vertex_owner then
+                                log.info(("[MHRS-Files-HotReload] Updated worn vertices %s on existing renderer %s (%s -> %s)")
+                                    :format(row.mesh.path,tostring(row.comp:get_address()),tostring(row.mesh.original),tostring(row.mesh.fresh)))
+                            end
                         end
                     end
                     local updated={}
@@ -1146,6 +1190,10 @@ function M.run(action,req,native)
                     end
                 end
                 if not ok then
+                    if batch.local_done and batch.vertex_fallback and not batch.aborted then
+                        local restored,why=pcall(worn_armor.abort,batch,restore_when_ready)
+                        if not restored then pending=tostring(pending).."; rollback: "..tostring(why) end
+                    end
                     peer_equipment.abort(batch.peers,restore_when_ready)
                     peer_physics.abort(batch.peer_physics,restore_when_ready)
                 end
@@ -1342,7 +1390,7 @@ function M.run(action,req,native)
         for _ in pairs(armor_candidates) do armor_count=armor_count+1 end
         local chain_components={}
         local peer_effects,chain_actors
-        local rebuild=false
+        local rebuild,positions_only=false,false
         if next(armor_candidates) or next(req.shadow_skeletons or {}) or next(physics_spec.chains or {}) then
             chain_components=scene_components("via.motion.Chain",components_by_type)
             peer_effects,chain_components,chain_actors=peer_physics.capture(chain_components,req,live,equipment,function(path,ext)
@@ -1354,10 +1402,53 @@ function M.run(action,req,native)
             local pm=sdk.get_managed_singleton("snow.player.PlayerManager")
             local master=pm and pm:call("findMasterPlayer")
             local hunter=master and master:call("get_GameObject")
-            rebuild=worn_armor.requires_model_rebuild(armor_candidates,live,chain_components,hunter,physics_spec.chains or {})
-            rebuild=rebuild or training_rebuild
+            local only=next(live)
+            local prior,retained,stock,slot_no
+            if only and not next(live,only) and armor_count==1 and (req.peer_meshes or {})[only]
+                    and not next(req.shadow_skeletons or {}) and not next(physics_spec.chains or {}) then
+                for id,row in pairs(armor_candidates) do
+                    local part=chain_actors.parts[row.go:get_address()]
+                    local instance=armor_instances[id]
+                    retained=instance and instance.go==row.go and instance.queued_vertex
+                        and instance.queued_vertex:read_qword(0x10)==row.mesh.original
+                    stock=worn_armor.resident_stock(row,instance,part)
+                    prior=retained or stock or peer_equipment.stock_layout(only,row.mesh.original,
+                        not worn_armor.needs_reentry(row,instance,armor_origins,startup))
+                    slot_no=part and part.slot
+                    if row.mesh.path:lower()==only and part and part.entry and part.entry.role=="master"
+                            and part.entry.scope and row.wearer_owns and part.entry.player==master and part.go==row.go and prior then
+                        local slot=part.slot
+                        row.vertex_owner=function(go)
+                            return (not go or go==row.go) and row.wearer_owns(row.go)
+                                and pm:call("findMasterPlayer")==master and master:call("get_GameObject")==hunter
+                                and master:call("getPartsGameObject",slot)==row.go and hunter_roster.render_part(row.go)==row.comp
+                        end
+                    end
+                end
+            end
+            local reason
+            rebuild,positions_only,reason=worn_armor.requires_model_rebuild(armor_candidates,live,chain_components,hunter,physics_spec.chains or {})
+            rebuild=rebuild or (training_rebuild and not positions_only)
+            if only and not next(live,only) and only:match("^player/mod/.+%.mesh$") then
+                log.info(("[MHRS-Files-HotReload] Worn mesh route %s candidates=%d slot=%s incoming=%s old=%s queued_old=%s worn_pak=%s wait=%s rebuild=%s (%s)")
+                    :format(only,armor_count,tostring(slot_no),tostring((req.peer_meshes or {})[only]==true),
+                    tostring(prior==true),tostring(retained==true),tostring(stock==true),tostring(pause_hunter==true),
+                    tostring(rebuild==true),tostring(reason)))
+            end
+            if positions_only and not rebuild then
+                for id,row in pairs(armor_candidates) do
+                    row.mdf2.keep=true
+                    if pause_hunter and not retained then
+                        local resource=assert(sdk.to_resource(sdk.to_ptr(row.mesh.original)))
+                        local pin=assert(resource:create_holder_global(row.mesh.kind[2].."Holder"))
+                        assert(pin:read_qword(0x10)==row.mesh.original,"Could not retain queued vertex source")
+                        armor_instance(id,row.go).queued_vertex=pin
+                    end
+                end
+            end
         end
-        if not pause_hunter and not rebuild and (shadow or next(armor_candidates) or next(physics_spec.chains or {})) then
+        if not pause_hunter and not rebuild and not positions_only
+                and (shadow or next(armor_candidates) or next(physics_spec.chains or {})) then
             local protected=armor_candidates
             if shadow then
                 protected={}
@@ -1378,7 +1469,7 @@ function M.run(action,req,native)
         local deferred_paths=(pause_hunter or rebuild) and {} or nil
         for id,row in pairs(armor_candidates) do
             if not row.mesh.keep and worn_armor.needs_reentry(row,armor_instances[id],armor_origins,startup)
-                    and not (chains and chains:covers(row)) then
+                    and not row.vertex_owner and not (chains and chains:covers(row)) then
                 deferred_paths={}
                 break
             end
@@ -1433,12 +1524,20 @@ function M.run(action,req,native)
                 batch.physics=physics
             end
             batch.candidates=armor_candidates
+            if positions_only and not rebuild then
+                batch.vertex_fallback=function()
+                    return require("MHRS_HotReload.village_equipment").capture(armor_candidates,physics_spec,
+                        req.expected_materials or {},nil,req.missing or {})
+                end
+            end
             batch.peers=peer_tasks
             batch.peer_physics=peer_effects
             batch.peer_meshes=req.peer_meshes
             if armor_mesh_requested and next(armor_candidates) then batch.mesh_changes=live end
             batch.chains=chains
             batch.village=village
+            batch.stock_meshes=req.stock_meshes
+            batch.stock_scope=chain_actors and chain_actors.scope
             batch.shadow=shadow
             batch.loose=loose
             equipment_batch=batch

@@ -229,7 +229,7 @@ def require_closed_writers(paths):
         close(handle)
 
 
-def snapshots(root, files, signature, suffixes, anchor=None):
+def snapshots(root, files, signature, suffixes, anchor=None, known_link_change=None):
     root = Path(root)
     anchor = root.parent if anchor is None else Path(anchor)
     notifications = LooseChanges(root, anchor) if os.name == "nt" else None
@@ -265,7 +265,7 @@ def snapshots(root, files, signature, suffixes, anchor=None):
 
     change_times = None
 
-    def polling_stamps(entries):
+    def change_stamps(entries):
         nonlocal change_times
         if os.name != "nt":
             return {}
@@ -277,7 +277,7 @@ def snapshots(root, files, signature, suffixes, anchor=None):
         # Arm before enumeration so copies made during the initial walk follow
         # the startup snapshot. Never mutate snapshots held by the consumer.
         current = reconcile()
-        stamps = polling_stamps(current) if not notifications or not notifications.tree else {}
+        stamps = change_stamps(current)
         next_scan = time.monotonic() + POLL_INTERVAL
         while True:
             timeout = yield current
@@ -287,19 +287,27 @@ def snapshots(root, files, signature, suffixes, anchor=None):
             else:
                 time.sleep(timeout)
                 paths, structural, overflow = set(), set(), False
-            if not notifications or (not notifications.tree and not overflow):
+            if overflow or not notifications or not notifications.tree:
                 started = time.monotonic()
-                if started < next_scan:
+                if not overflow and started < next_scan:
                     continue
                 sequence += 1
-                refreshed = scan(root)
-                new_stamps = polling_stamps(refreshed)
-                # A polling scan only publishes actual changes. A previous
-                # notification generation survives as long as its file does.
+                refreshed = reconcile() if overflow else scan(root)
+                new_stamps = change_stamps(refreshed)
+                # Lost notifications can hide writes that preserved mtime.
+                # Keep prior generations only with a matching identity, size,
+                # mtime and NTFS ChangeTime or a verified hard-link transition.
                 for file in refreshed.keys() & current.keys():
+                    state = refreshed[file][0]
+                    if state != current[file][0]:
+                        continue
+                    prior = stamps.get(file)
                     stamp = new_stamps.get(file)
-                    if refreshed[file][0] == current[file][0] and (
-                            stamp is None or stamps.get(file) is None or stamp == stamps[file]):
+                    if prior is None or stamp is None:
+                        unchanged = not overflow
+                    else:
+                        unchanged = prior == stamp or (known_link_change and known_link_change(file, state, prior, stamp))
+                    if unchanged:
                         refreshed[file] = current[file]
                 stamps = new_stamps
                 finished = time.monotonic()
@@ -307,15 +315,9 @@ def snapshots(root, files, signature, suffixes, anchor=None):
                 if refreshed != current:
                     current = refreshed
                 continue
-            if not paths and not overflow:
+            if not paths:
                 continue
             sequence += 1
-            if overflow:
-                # Windows no longer knows which timestamps may have been preserved.
-                current = reconcile()
-                if not notifications.tree:
-                    stamps = polling_stamps(current)
-                continue
             # Moving a whole directory need not emit events for its children.
             live_dirs = {p for p in structural if p.is_dir()}
             directories = live_dirs | {p for p in structural if p in directory_counts}
@@ -342,6 +344,10 @@ def snapshots(root, files, signature, suffixes, anchor=None):
                     updated.pop(file, None)
             if updated != current:
                 for file in affected:
+                    if file in updated and change_times:
+                        stamps[file] = change_times.read(file)
+                    else:
+                        stamps.pop(file, None)
                     if (file in current) != (file in updated):
                         count_parents(file, 1 if file in updated else -1)
                 current = updated

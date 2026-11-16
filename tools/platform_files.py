@@ -1,4 +1,5 @@
 """Own the .stm platform variants used when reopening Rise equipment resources."""
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import ctypes
 from ctypes import wintypes
@@ -54,6 +55,18 @@ def _reader(path, *, can_delete=False, allow_rename=False):
         if os.fstat(fd).st_file_attributes & 0x400:
             raise PlatformFileConflict(f"Platform path is a reparse point: {path}")
         yield stream
+
+
+@contextmanager
+def _publication_source(source, ordinary):
+    # Hard-link publication needs FILE_SHARE_DELETE. An installer can rename
+    # the old ordinary file away, then put another file under its original name.
+    with _reader(source, allow_rename=True) as protected:
+        yield protected
+        if not os.path.samestat(os.fstat(protected.fileno()), source.stat()):
+            raise OSError(f"Source was replaced while staging {source}")
+        if source != ordinary and ordinary.exists():
+            raise OSError(f"Mod was reinstalled while staging PAK data for {ordinary}")
 
 
 def _identity(stream):
@@ -118,6 +131,7 @@ class PlatformFiles:
 
     def __init__(self, root, state_dir):
         self.root = Path(root).resolve()
+        self._link_changes = {}
         self.state = Path(state_dir) / "platform-files"
         self.state.mkdir(parents=True, exist_ok=True)
         self.lock = (self.state / "lock").open("a+b")
@@ -184,6 +198,7 @@ class PlatformFiles:
 
     def _retire(self, journal, record):
         source = self._source(record["source"])
+        self._link_changes.pop(source, None)
         if self._journal(record["source"]) != journal:
             raise ValueError(f"Invalid platform ownership journal: {journal}")
         target = Path(str(source) + ".stm")
@@ -206,7 +221,7 @@ class PlatformFiles:
         if errors:
             raise OSError("Platform-file recovery failed: " + " / ".join(errors))
 
-    def _prepare(self, ordinary, package=None):
+    def _prepare(self, ordinary, package=None, *, detached=False, transfer_package=False):
         key = ordinary.relative_to(self.root).as_posix()
         ordinary = self._source(key)
         target = Path(str(ordinary) + ".stm")
@@ -216,112 +231,194 @@ class PlatformFiles:
             self._retire(journal, record)
             record = {"source": key}
         packaged = package is not None and not ordinary.exists()
+        if transfer_package and not packaged:
+            return False
         source = package if packaged else ordinary
         if not packaged and not source.exists():
             if journal.exists():
                 self._retire(journal, record)
             return False
         owner = record.get("owner")
-        with _reader(source) as stream:
-            source_id = _identity(stream)
-            if owner and owner["linked"] and owner["id"] == source_id:
+        with _publication_source(source, ordinary) as protected:
+            source_id = _identity(protected)
+            if not detached and owner and owner["linked"] and owner["id"] == source_id:
                 try:
                     with _reader(target) as side:
                         if _identity(side) == source_id:
-                            stamp = _stamp(stream)
+                            stamp = _stamp(protected)
                             if stamp is None or stamp != owner.get("stamp"):
-                                owner["sha256"] = _digest(stream)
+                                owner["sha256"] = _digest(protected)
                                 owner["stamp"] = stamp
                                 self._save(journal, record)
                             return True
                 except FileNotFoundError:
                     pass
-            digest = _digest(stream)
-        try:
-            with _reader(target) as stream:
-                target_id = _identity(stream)
-                target_digest = digest if source_id == target_id else _digest(stream)
-                same_content = digest == target_digest
-                owned = owner is not None and target_id == owner["id"]
-                if owned and not (owner["linked"] and target_id == source_id):
-                    owned = target_digest == owner["sha256"]
-                if not owned:
-                    if journal.exists():
-                        journal.unlink()
-                    if not same_content:
-                        raise PlatformFileConflict(f"Existing user platform file differs from {source}: {target}")
-                    return True
-                if (same_content and bool(owner.get("packaged")) == packaged
-                        and (not owner["linked"] or source_id == target_id)):
-                    if digest != owner["sha256"]:
-                        owner["sha256"] = digest
-                        self._save(journal, record)
-                    return True
-        except FileNotFoundError:
-            pass
+            digest = _digest(protected)
+            try:
+                with _reader(target) as stream:
+                    target_id = _identity(stream)
+                    target_digest = digest if source_id == target_id else _digest(stream)
+                    same_content = digest == target_digest
+                    owned = owner is not None and target_id == owner["id"]
+                    if owned and not (owner["linked"] and target_id == source_id):
+                        owned = target_digest == owner["sha256"]
+                    if not owned:
+                        if journal.exists():
+                            journal.unlink()
+                        if not same_content:
+                            raise PlatformFileConflict(f"Existing user platform file differs from {source}: {target}")
+                        return True
+                    if (same_content and bool(owner.get("packaged")) == packaged
+                            and (not owner["linked"] or (not detached and source_id == target_id))):
+                        if digest != owner["sha256"]:
+                            owner["sha256"] = digest
+                            self._save(journal, record)
+                        return True
+            except FileNotFoundError:
+                pass
 
-        record["stage"] = uuid.uuid4().hex
-        scratch = self._scratch(ordinary, record)
-        if scratch.exists():
-            raise FileExistsError(scratch)
-        self._save(journal, record)
-        # A mod manager may remove the whole outfit's directory on uninstall.
-        # The extracted copy is published exclusively under the .stm spelling.
-        scratch.mkdir(parents=packaged)
-        payload = scratch / "payload"
-        # The private PAK extract may be reused. Keep writes made through a
-        # mod-visible .stm file from mutating that original.
-        linked = False
-        if not packaged:
-            try:
-                os.link(source, payload)
-                linked = True
-            except OSError as exc:
-                # Sharing, capacity and other transient failures should retry.
-                if exc.winerror not in (1, 5, 17, 50, 1142, 1314):
-                    raise
-        if not linked:
-            with _reader(source) as src, payload.open("xb") as dst:
-                if _identity(src) != source_id:
-                    raise OSError(f"Source was replaced while staging {source}")
-                shutil.copyfileobj(src, dst, 1024 * 1024)
-                dst.flush()
-                os.fsync(dst.fileno())
-        # Keep writers out across the final verification and rename. The
-        # rename itself can advance NTFS ChangeTime on the hard-linked file.
-        with _reader(payload, allow_rename=True) as stream:
-            ident = _identity(stream)
-            if (linked and ident != source_id) or _digest(stream) != digest:
-                raise OSError(f"Source changed while staging {source}")
-            if packaged and ordinary.exists():
-                raise OSError(f"Mod was reinstalled while staging PAK data for {ordinary}")
-            record["next"] = {"id": ident, "sha256": digest, "linked": linked, "packaged": packaged}
+            record["stage"] = uuid.uuid4().hex
+            before_link = _stamp(protected) if not packaged else None
+            scratch = self._scratch(ordinary, record)
+            if scratch.exists():
+                raise FileExistsError(scratch)
             self._save(journal, record)
-            _remove_if_owned(target, owner, ordinary)
-            try:
-                # On Windows rename is atomic and fails if another mod occupied
-                # the destination since our check. Never use os.replace here.
-                os.rename(payload, target)
-            except FileExistsError as exc:
-                raise PlatformFileConflict(f"Another mod owns the destination {target}") from exc
-            if linked:
-                record["next"]["stamp"] = _stamp(stream)
-        self._clean_stage(ordinary, record)
-        self._save(journal, {"source": key, "owner": record["next"]})
-        return True
+            # A mod manager may remove the whole outfit's directory on uninstall.
+            # The extracted copy is published exclusively under the .stm spelling.
+            scratch.mkdir(parents=packaged)
+            payload = scratch / "payload"
+            # The private PAK extract may be reused. Keep writes made through a
+            # mod-visible .stm file from mutating that original.
+            linked = False
+            # A freshly extracted temporary PAK payload can hand its sole
+            # directory entry to the platform file without copying the bytes.
+            if (not packaged and not detached) or transfer_package:
+                try:
+                    os.link(source, payload)
+                    linked = True
+                except OSError as exc:
+                    # Sharing, capacity and other transient failures should retry.
+                    if exc.winerror not in (1, 5, 17, 50, 1142, 1314):
+                        raise
+            if not linked:
+                with payload.open("xb") as dst:
+                    protected.seek(0)
+                    shutil.copyfileobj(protected, dst, 1024 * 1024)
+                    dst.flush()
+                    os.fsync(dst.fileno())
+            # Keep writers out across the final verification and rename. The
+            # rename itself can advance NTFS ChangeTime on the hard-linked file.
+            with _reader(payload, allow_rename=True) as stream:
+                ident = _identity(stream)
+                # The source handle has denied all writers since its first SHA-256.
+                # The same file ID proves a staged hard link has those exact bytes.
+                if not os.path.samestat(os.fstat(protected.fileno()), source.stat()):
+                    raise OSError(f"Source was replaced while staging {source}")
+                same_content = ident == source_id if linked else _digest(stream) == digest
+                if not same_content:
+                    raise OSError(f"Source changed while staging {source}")
+                if packaged and ordinary.exists():
+                    raise OSError(f"Mod was reinstalled while staging PAK data for {ordinary}")
+                record["next"] = {"id": ident, "sha256": digest, "linked": linked and not packaged, "packaged": packaged}
+                self._save(journal, record)
+                _remove_if_owned(target, owner, ordinary)
+                try:
+                    # On Windows rename is atomic and fails if another mod occupied
+                    # the destination since our check. Never use os.replace here.
+                    os.rename(payload, target)
+                except FileExistsError as exc:
+                    raise PlatformFileConflict(f"Another mod owns the destination {target}") from exc
+                after_link = _stamp(protected) if before_link else None
+                if linked and not packaged:
+                    record["next"]["stamp"] = after_link
+                replacing_link = owner and owner["linked"] and owner["id"] == source_id
+                if (linked or replacing_link) and before_link and after_link and before_link[2] != after_link[2]:
+                    # Creating a hard link and later detaching it may both
+                    # advance ChangeTime before the watcher next polls. Both
+                    # transitions were covered by a handle that denied writers.
+                    previous = self._link_changes.get(ordinary)
+                    original = (previous[1] if previous and previous[0] == source_id[1]
+                                and previous[3] == before_link[2] else before_link[2])
+                    self._link_changes[ordinary] = (source_id[1], original, before_link[2], after_link[2])
+            self._clean_stage(ordinary, record)
+            self._save(journal, {"source": key, "owner": record["next"]})
+            return True
+
+    @contextmanager
+    def pin_copy(self, ordinary, package=None):
+        """Hold the exact platform entry used by the renderer. Leave ordinary installs writable."""
+        key = ordinary.relative_to(self.root).as_posix()
+        source = self._source(key)
+        target = Path(str(source) + ".stm")
+        journal = self._journal(key)
+        if target.exists():
+            record = json.loads(journal.read_text(encoding="utf-8")) if journal.exists() else {}
+            owner = record.get("owner")
+            info = target.stat()
+            if not owner or [info.st_dev, info.st_ino] != owner["id"]:
+                yield None
+                return
+        if self._prepare(source, package, detached=True) and journal.exists():
+            owner = json.loads(journal.read_text(encoding="utf-8")).get("owner")
+            if owner and not owner["linked"]:
+                with _reader(target) as stream:
+                    if _identity(stream) == owner["id"] and os.fstat(stream.fileno()).st_nlink == 1:
+                        yield stream
+                        return
+        yield None
+
+    @contextmanager
+    def pin_package(self, ordinary):
+        """Prove the existing private PAK payload still owns the requested platform name."""
+        key = ordinary.relative_to(self.root).as_posix()
+        target = Path(str(self._source(key)) + ".stm")
+        journal = self._journal(key)
+        record = json.loads(journal.read_text(encoding="utf-8")) if journal.exists() else {}
+        owner = record.get("owner")
+        if owner and owner.get("packaged") and not owner["linked"] and target.is_file():
+            info = target.stat()
+            if [info.st_dev, info.st_ino] != owner["id"]:
+                yield None
+                return
+            with _reader(target) as stream:
+                if (_identity(stream) == owner["id"] and os.fstat(stream.fileno()).st_nlink == 1
+                        and _digest(stream) == owner["sha256"]):
+                    stream.seek(0)
+                    yield stream
+                    return
+        yield None
+
+    def known_link_change(self, path, signature, before, after):
+        receipt = self._link_changes.get(path)
+        return bool(receipt and receipt[0] == signature[0] and before in receipt[1:3] and after == receipt[3])
 
     def prepare(self, files):
+        sources = sorted({Path(path) for path in files if self.supports(path)})
+        if len(sources) < 8:
+            return {source for source in sources if self._prepare(source)}
+        # Each path has its own ownership journal and scratch directory. Wait
+        # for every publisher before the game can see the batch or we can retry.
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="MHRS assets") as workers:
+            results = {source: workers.submit(self._prepare, source) for source in sources}
         present = set()
-        for source in sorted({Path(path) for path in files}):
-            if self.supports(source) and self._prepare(source):
+        for source, result in results.items():
+            try:
+                ready = result.result()
+            except OSError as error:
+                # An installer may hard-link two source paths to the same file.
+                # Overlapping verification handles can temporarily deny rename.
+                if error.winerror not in (32, 33):
+                    raise
+                ready = self._prepare(source)
+            if ready:
                 present.add(source)
         return present
 
-    def prepare_from_package(self, files):
+    def prepare_from_package(self, files, *, transfer=False):
         """Stage a private PAK extract if the mod file is absent; prefer a reinstall."""
         present = set()
         for ordinary, package in sorted((Path(k), Path(v)) for k, v in files.items()):
-            if self.supports(ordinary) and self._prepare(ordinary, package):
+            if self.supports(ordinary) and self._prepare(ordinary, package, transfer_package=transfer):
                 present.add(ordinary)
         return present
 

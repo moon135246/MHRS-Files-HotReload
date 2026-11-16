@@ -1,6 +1,8 @@
 -- Change both resource holders on the existing render component in one game
 -- update. Keep the previous pair until a later update verifies the renderer.
 local M = {}
+local array_elements = require("MHRS_HotReload.array_elements")
+local roster = require("MHRS_HotReload.hunter_roster")
 local shadow_skeleton = require("MHRS_HotReload.shadow_skeleton")
 local extensions = {"mesh", "mdf2"}
 local recovering = {}
@@ -8,6 +10,50 @@ local stopping = false
 
 local function address(holder)
     return holder and holder:read_qword(0x10)
+end
+
+-- A normal equipment load may have restored a certified PAK mesh without
+-- inspecting vertex buffers. Record only the platform resource actually
+-- attached to this rebuilt master's slot after the five-part verification.
+function M.remember_stock(batch,actors,resources,instance)
+    local tx=batch.village
+    if not tx or not tx.stable or tx.stable<2 or not batch.stock_scope or actors.scope~=batch.stock_scope then return 0 end
+    local count=0
+    for _,owner in ipairs(actors.entries) do
+        if owner.role=="master" and owner.index==tx.index and owner.scope==batch.stock_scope
+                and tostring(owner.root:get_address())==tx.new_address then
+            for slot,expected in pairs(tx.parts) do
+                local path=expected.mesh
+                local name=expected.mesh_name
+                local go=owner.slots[slot]
+                local part=go and actors.parts[go:get_address()]
+                if expected.touched and batch.stock_meshes[path]==true and batch.platform[name] and resources[name]
+                        and part and part.entry==owner and part.slot==slot and part.go==go
+                        and go:call("get_Valid") and go:call("get_Update") and go:call("get_Name")==expected.name then
+                    local comp,h=roster.render_part(go)
+                    local res=resources[name]
+                    if h and h:call("get_ResourcePath"):lower()==path and address(h)==res:get_address()
+                            and comp:call("get_MeshReady") and comp:call("get_MaterialReady") then
+                        local pin=res:create_holder_global("via.render.MeshResourceHolder")
+                        if address(pin)==address(h) then
+                            instance(comp:get_address(),go).stock={path=path,holder=pin,comp=comp,slot=slot,
+                                root=owner.root,scope=owner.scope}
+                            count=count+1
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return count
+end
+
+function M.resident_stock(row,instance,part)
+    local proof=instance and instance.go==row.go and instance.stock
+    local owner=part and part.entry
+    return proof and owner and owner.role=="master" and part.go==row.go and proof.slot==part.slot
+        and proof.comp==row.comp and proof.root==owner.root and proof.scope==owner.scope
+        and proof.path==row.mesh.path:lower() and address(proof.holder)==row.mesh.original
 end
 
 -- Pin provenance to the actual resource and scene instance. A preview model
@@ -36,20 +82,34 @@ end
 -- Even a mesh on a part with no Chain of its own can share the hunter's
 -- joint map with a sibling's running simulation (the stock Mei body does).
 function M.requires_model_rebuild(candidates, changed, components, hunter, incoming_chains)
-    local mesh_changed,foreign=false,false
+    local mesh_changed,foreign,positions_only=false,false,true
     for _,row in pairs(candidates) do
         row.mesh.keep=not changed[row.mesh.path:lower()]
+        if not row.vertex_owner or row.mesh.keep then positions_only=false
+        else
+            local ok,owned=pcall(row.vertex_owner)
+            if not ok or not owned then return true,false,"local slot changed" end
+        end
         if not row.mesh.keep then
             mesh_changed=true
             if not hunter or not belongs_to(row.go,hunter) then foreign=true end
         end
     end
-    if not mesh_changed then return false end
-    if foreign or next(incoming_chains) then return true end
+    if not mesh_changed then return false,false,"material only" end
+    if foreign or next(incoming_chains) then return true,false,"foreign part or incoming chain" end
     for _,comp in ipairs(components) do
-        if belongs_to(comp:call("get_GameObject"),hunter) then return true end
+        local go=comp:call("get_GameObject")
+        if belongs_to(go,hunter) then
+            if not positions_only then return true,false,"hunter has chain; mesh layout unconfirmed" end
+            -- The topology and skinning of this single part are immutable.
+            -- Its own simulation, a child simulation or a parent simulation
+            -- still makes the live render binding ineligible.
+            for _,row in pairs(candidates) do
+                if belongs_to(go,row.go) or belongs_to(row.go,go) then return true,false,"chain in renderer hierarchy" end
+            end
+        end
     end
-    return false
+    return false,positions_only,positions_only and "stock vertex layout" or "no hunter chain"
 end
 
 local function physics_changed(batch, candidates)
@@ -110,12 +170,24 @@ function M.check_sources(batch, resources, stream)
 end
 
 local function live(row)
+    local owns=row.vertex_owner or row.wearer_owns
     return row.go:call("get_Valid") and row.comp:call("get_GameObject") == row.go
-        and (not row.wearer_owns or row.wearer_owns(row.go))
+        and (not owns or owns(row.go))
 end
 
 local function current(row, ext)
     return address(row.comp:call(row[ext].kind[3]))
+end
+
+local function material_binding(row,values,geometry)
+    local owns=row.wearer_owns
+    if row.vertex_owner then
+        owns=function(go)
+            return row.vertex_owner(go)
+                and current(row,"mesh")==geometry and current(row,"mdf2")==row.mdf2.original
+        end
+    end
+    return {comp=row.comp,kind=row.mdf2.kind,switches=values,parts=row.part_switches,wearer_owns=owns}
 end
 
 local function restore(row, restore_when_ready)
@@ -126,7 +198,7 @@ local function restore(row, restore_when_ready)
     end
     assert(current(row, "mesh") == row.mesh.original and current(row, "mdf2") == row.mdf2.original,
         "Could not restore equipment holders")
-    restore_when_ready({comp=row.comp, kind=row.mdf2.kind, switches=row.rollback_material,wearer_owns=row.wearer_owns})
+    restore_when_ready(material_binding(row,row.rollback_material,row.mesh.original))
 end
 
 local function restore_chains(batch, failures)
@@ -200,10 +272,10 @@ function M.abort(batch, restore_when_ready, synchronous)
     for i = #(batch.touched or {}), 1, -1 do
         local row = batch.touched[i]
         local ok, err = pcall(function()
-            if not live(row) then return end
+            if not live(row) or (row.vertex_owner and not row.go:call("get_Update")) then return end
             -- After yielding, the game may have equipped a different item.
             -- Restore only a pair still owned by this transaction.
-            if not synchronous then
+            if not synchronous or row.vertex_owner then
                 for _, ext in ipairs(extensions) do
                     local value, slot = current(row, ext), row[ext]
                     if value ~= slot.fresh and value ~= slot.original then return end
@@ -224,6 +296,24 @@ function M.abort(batch, restore_when_ready, synchronous)
     end
     restore_chains(batch,failures)
     assert(#failures == 0, table.concat(failures, " / "))
+end
+
+local function same_joints(row)
+    local function names(h)
+        return array_elements(row.comp:call("getJointNameList",h),"equipment mesh joints")
+    end
+    local a,b=names(row.mesh.old),names(row.mesh.holder)
+    local count=0
+    for i,v in pairs(a) do
+        if not b[i] then return false end
+        local old=type(v)=="string" and v or v:call("ToString()")
+        local new=type(b[i])=="string" and b[i] or b[i]:call("ToString()")
+        if old~=new then return false end
+        count=count+1
+    end
+    if count==0 then return false end
+    for _ in pairs(b) do count=count-1 end
+    return count==0
 end
 
 local function stage(batch, components, resources, material_state)
@@ -258,9 +348,17 @@ local function stage(batch, components, resources, material_state)
                 end
                 assert(address(slot.holder) == slot.fresh, "Incorrect equipment holder: " .. slot.path)
             end
+            if row.vertex_owner then
+                local ok,matches=pcall(same_joints,row)
+                if not ok or not matches then
+                    if log then log.info("[MHRS-Files-HotReload] Worn mesh joint check selected normal equipment load: "..
+                        row.mesh.path.." ("..tostring(matches)..")") end
+                    return nil
+                end
+            end
             if comp:call("get_MaterialReady") then
-                row.rollback_material = material_state(comp, true)
-                row.switches = material_state(comp, false)
+                row.rollback_material,row.part_switches=material_state(comp,row.vertex_owner and "vertices" or true)
+                row.switches=row.vertex_owner and row.rollback_material or material_state(comp,false)
             end
             staged[#staged + 1] = row
         end
@@ -270,7 +368,14 @@ end
 
 local function verify(row)
     local comp = row.comp
-    if not live(row) or not row.go:call("get_Update") then return true end
+    if not live(row) then
+        assert(not row.vertex_owner,"[village changed] Vertex edit lost its worn renderer")
+        return true
+    end
+    if not row.go:call("get_Update") then
+        if row.vertex_owner then return false,"Worn vertex renderer is inactive" end
+        return true
+    end
     for _, ext in ipairs(extensions) do
         if current(row, ext) ~= row[ext].fresh then
             return false, "Equipment holder changed: " .. row[ext].path
@@ -289,6 +394,19 @@ local function verify(row)
             end
         end
         if not matches then return false, "Equipped material slots differ from the loose MDF: " .. row.mdf2.path end
+    end
+    return true
+end
+
+function M.vertices_ready(batch)
+    for _,row in ipairs(batch.touched or {}) do
+        if row.vertex_owner then
+            local ready,reason=verify(row)
+            if not ready then
+                assert(os.clock()<batch.deadline,reason)
+                return false
+            end
+        end
     end
     return true
 end
@@ -350,8 +468,21 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
             batch.scene_components=scene_components
             assert(not physics_changed(batch,batch.candidates),
                 "[live equipment rejected] Hunter or physics changed while equipment was loading")
-            local staged = next(batch.candidates) and
-                stage(batch, scene_components("via.render.Mesh"), resources, material_state) or {}
+            local staged={}
+            if next(batch.candidates) then
+                staged=stage(batch,scene_components("via.render.Mesh"),resources,material_state)
+                if not staged then
+                    batch.village=batch.vertex_fallback and batch.vertex_fallback()
+                    assert(batch.village,"[live equipment rejected] Worn mesh joint layout could not be confirmed")
+                    batch.candidates={}
+                    return true
+                end
+            end
+            for _,row in pairs(batch.candidates) do
+                if row.vertex_owner then
+                    assert(#staged==1 and staged[1]==row,"Worn part changed before its renderer update")
+                end
+            end
             if batch.physics then batch.physics:stage(resources) end
             batch.touched = {}
             for _, row in ipairs(staged) do
@@ -399,7 +530,7 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
         end
         for _, row in ipairs(batch.touched) do
             if live(row) and row.go:call("get_Update") then
-                restore_when_ready({comp=row.comp, kind=row.mdf2.kind, switches=row.switches,wearer_owns=row.wearer_owns})
+                restore_when_ready(material_binding(row,row.switches,row.mesh.fresh))
             end
         end
         return false

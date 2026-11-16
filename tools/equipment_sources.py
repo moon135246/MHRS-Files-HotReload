@@ -1,4 +1,5 @@
 """Select physical loose/PAK files for the equipment ResourceManager's platform lookup."""
+from contextlib import contextmanager
 import tempfile
 from pathlib import Path
 
@@ -122,14 +123,58 @@ class EquipmentSources:
                        if not logical_path(self.root, f).lower().startswith("streaming/"))
         return selected, ready, names
 
-    def _stage_packages(self, files):
+    @contextmanager
+    def vertex_source(self, file, stock, installed):
+        # A cold removal has no ordinary file. Explicitly select the PAK copy
+        # so another installer cannot redirect a pending ordinary resource read.
+        with tempfile.TemporaryDirectory() as directory:
+            package = None
+            if not installed:
+                if file.exists():
+                    yield None
+                    return
+                package = Path(directory) / "mesh"
+                package.write_bytes(stock)
+            with self.platforms.pin_copy(file, package) as stream:
+                if stream:
+                    self.staged.add(file)
+                    if file.exists():
+                        self.packaged.discard(file)
+                    else:
+                        self.packaged.add(file)
+                yield stream
+
+    @contextmanager
+    def stock_mesh_source(self, file):
+        if file.exists():
+            yield None
+            return
+        # Startup removals may already have an owned PAK alias. Only a
+        # genuinely missing, worn mesh from a cold installation needs one.
+        if file not in self.packaged and not Path(str(file) + ".stm").exists():
+            self.staged.update(self._stage_packages({file}, transfer=True))
+        if file in self.packaged and not file.exists():
+            with self.platforms.pin_package(file) as stream:
+                yield stream
+        else:
+            yield None
+
+    def _stage_packages(self, files, *, transfer=False):
         ready = set()
         if files:
-            with tempfile.TemporaryDirectory() as directory:
+            with tempfile.TemporaryDirectory(dir=self.platforms.state if transfer else None) as directory:
                 for i, file in enumerate(sorted(files)):
                     dest = Path(directory) / str(i)
-                    if self.archives.extract(file.relative_to(self.root), dest):
-                        ready.update(self.platforms.prepare_from_package({file: dest}))
+                    try:
+                        available = self.archives.extract(file.relative_to(self.root), dest)
+                    except (RuntimeError, ValueError):
+                        if not transfer:
+                            raise
+                        # This optional stock-generation proof must not prevent
+                        # the engine's ordinary reload of an unsupported PAK.
+                        available = False
+                    if available:
+                        ready.update(self.platforms.prepare_from_package({file: dest}, transfer=transfer))
                     dest.unlink(missing_ok=True)
             self.packaged.difference_update(files)
             self.packaged.update(f for f in ready if not f.exists())

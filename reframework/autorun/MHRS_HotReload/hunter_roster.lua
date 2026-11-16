@@ -178,17 +178,20 @@ function M.render_part(go)
 end
 
 function M.mesh_paths(wanted)
-    local found={}
-    for _,e in pairs(M.read().by_index) do
-        for _,go in pairs(e.slots) do
-            pcall(function()
-                local _,mh=M.render_part(go)
-                local path=mh and mh:call("get_ResourcePath"):lower():gsub("^@",""):gsub("\\","/")
-                if path and wanted[path] then found[path]=true end
-            end)
+    local peers,master={},{}
+    for _,e in ipairs(M.read().entries) do
+        local found=e.role=="master" and master or (e.role=="peer" and peers)
+        if found then
+            for _,go in pairs(e.slots) do
+                pcall(function()
+                    local _,mh=M.render_part(go)
+                    local path=mh and mh:call("get_ResourcePath"):lower():gsub("^@",""):gsub("\\","/")
+                    if path and wanted[path] then found[path]=true end
+                end)
+            end
         end
     end
-    return found
+    return peers,master
 end
 
 function M.describe(roster)
