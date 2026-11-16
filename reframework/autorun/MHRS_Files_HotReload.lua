@@ -53,6 +53,7 @@ end
 -- Source installs resolve the same functions from their development binaries.
 local embedded = ...
 if type(embedded) ~= "table" then embedded = nil end
+require("MHRS_HotReload.lua_bone_system").install(embedded and embedded.process_id)
 local native_lib = embedded or {}
 local dll_dir = "reframework/data/MHRS-Files-HotReload/"
 local runtime_dll = dll_dir .. "mhrs_hotreload.dll"

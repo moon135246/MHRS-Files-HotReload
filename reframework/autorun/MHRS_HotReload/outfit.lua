@@ -1025,6 +1025,9 @@ function M.run(action,req,native)
         return {paths=found,notifications=notify_ready}
     end
     if action=="asset_awake" then return awakened(req.done or {}) end
+    if action=="asset_worn_state" then
+        return (require("MHRS_HotReload.village_equipment").worn_state(req.paths))
+    end
     if action=="asset_equipment_abort" then
         release_equipment()
         return {pending=false}
@@ -1135,6 +1138,25 @@ function M.run(action,req,native)
                 armor_mesh_requested=true
             end
         end
+        local waiting,pause_hunter,retry_owners,training_rebuild
+        if armor_mesh_requested then
+            local state,owners=require("MHRS_HotReload.village_equipment").worn_state(live)
+            training_rebuild=state.training and next(state.observed)~=nil
+            if req.worn_retry then
+                retry_owners=owners
+                assert(state.ready,"[village changed] Hunter is not ready for the queued change")
+                for key,old in pairs(req.worn_retry) do
+                    assert(state.observed[key]==old and state.available[key],"[village changed] Equipment or its generation changed")
+                end
+            end
+            for key,old in pairs(state.observed) do
+                if (not state.ready or not state.available[key]) and not (req.missing or {})[key] then
+                    waiting=waiting or {}
+                    waiting[key]=old
+                end
+            end
+            pause_hunter=waiting and not state.ready
+        end
         local compound=#(req.live_reentry or paths)>1
         -- A whole-outfit swap changes the skeleton under an existing Chain.
         -- Its normal prefab creation can acquire the preloaded replacement.
@@ -1230,6 +1252,12 @@ function M.run(action,req,native)
         -- Replacing a mesh under a custom skeleton first instantiated by the
         -- game has terminated Rise after setters reported success. Keep the
         -- current renderers intact until the game rebuilds these equipment parts.
+        if req.worn_retry then
+            for key,old in pairs(req.worn_retry) do
+                local row=armor_candidates[retry_owners[key]]
+                assert(row and tostring(row.mesh.original)==old,"[village changed] Waiting for local worn mesh discovery")
+            end
+        end
         local shadow,shadow_reason,shadow_layout
         if next(req.shadow_skeletons or {}) then
             local manager=sdk.get_managed_singleton("snow.player.PlayerManager")
@@ -1254,8 +1282,9 @@ function M.run(action,req,native)
             local master=pm and pm:call("findMasterPlayer")
             local hunter=master and master:call("get_GameObject")
             rebuild=worn_armor.requires_model_rebuild(armor_candidates,live,chain_components,hunter,physics_spec.chains or {})
+            rebuild=rebuild or training_rebuild
         end
-        if not rebuild and (shadow or next(armor_candidates) or next(physics_spec.chains or {})) then
+        if not pause_hunter and not rebuild and (shadow or next(armor_candidates) or next(physics_spec.chains or {})) then
             local protected=armor_candidates
             if shadow then
                 protected={}
@@ -1269,7 +1298,7 @@ function M.run(action,req,native)
                 shadow=nil
             end
         end
-        local deferred_paths=rebuild and {} or nil
+        local deferred_paths=(pause_hunter or rebuild) and {} or nil
         for id,row in pairs(armor_candidates) do
             if not row.mesh.keep and worn_armor.needs_reentry(row,armor_instances[id],armor_origins,startup)
                     and not (chains and chains:covers(row)) then
@@ -1278,8 +1307,9 @@ function M.run(action,req,native)
             end
         end
         if deferred_paths then
-            village=require("MHRS_HotReload.village_equipment").capture(
+            village=not pause_hunter and require("MHRS_HotReload.village_equipment").capture(
                 armor_candidates,physics_spec,req.expected_materials or {},shadow_layout,req.missing or {})
+            assert(not req.worn_retry or village,"[village changed] Local equipment rebuild is not ready")
             for _,name in ipairs(names) do
                 local key=name:lower()
                 if physics_spec.chains and physics_spec.chains[key] and not (req.missing or {})[key] then
@@ -1378,7 +1408,7 @@ function M.run(action,req,native)
         counts:close()
         return {results=results,factories=factory_count,equipment=equipment_pending,
             equipment_bindings=deferred_paths and 0 or armor_count,deferred_equipment=deferred_paths,
-            shadow_deferred=shadow_reason,sleeping=next(sleeping)~=nil,
+            waiting_equipment=waiting,shadow_deferred=shadow_reason,sleeping=next(sleeping)~=nil,
             preview_targets=preview_targets}
     end
     if action=="asset_prefab_forget" then prefab_values[req.path:lower()]=nil;return {} end

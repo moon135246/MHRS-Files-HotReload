@@ -313,7 +313,9 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
         if not ok then
             local restored,reason=pcall(M.abort,batch,restore_when_ready)
             local message=tostring(pending)
-            if not message:find("[live equipment rejected]",1,true) then message="[live equipment rejected] "..message end
+            if not message:find("[village changed]",1,true) and not message:find("[live equipment rejected]",1,true) then
+                message="[live equipment rejected] "..message
+            end
             error(restored and message or (message.."; rollback: "..tostring(reason)))
         end
         return pending
