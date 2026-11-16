@@ -1,6 +1,8 @@
 -- Bind resources through their current scene or equipped component slots.
 local M = {}
 local worn_armor = require("MHRS_HotReload.worn_armor")
+local worn_chain = require("MHRS_HotReload.worn_chain")
+local shadow_skeleton = require("MHRS_HotReload.shadow_skeleton")
 local equipment_physics = require("MHRS_HotReload.equipment_physics")
 local kinds = {
     mesh={"via.render.Mesh","via.render.MeshResource","getMesh","setMesh"},
@@ -53,22 +55,7 @@ local function assign(b,h)
     end
 end
 
-local function array_elements(objects,label)
-    if not objects then return {} end
-    if type(objects)=="table" then return objects end
-    if objects.get_elements then return objects:get_elements() end
-    -- A typed array may arrive as an ordinary managed object. Snapshot it in
-    -- the same callback as the query; the engine can reuse it on later frames.
-    local td=objects:get_type_definition()
-    local get=td:is_a("System.Array") and td:get_method("Get(System.Int32)")
-    assert(get,"Unable to enumerate "..label)
-    local result={}
-    for i=0,objects:call("get_Length")-1 do
-        local element=get:call(objects,i)
-        if element then result[#result+1]=element end
-    end
-    return result
-end
+local array_elements = require("MHRS_HotReload.array_elements")
 
 local function scene_components(class,cache)
     if cache and cache[class] then return cache[class] end
@@ -936,7 +923,7 @@ local function request_equipment(equipment,platform,expected)
     local batch={platform=platform,materials={}}
     -- The first request after retirement determines the source for all users
     -- of that spelling. Publish texture keys before the MDF requests them.
-    for _,ext in ipairs({"tex","mesh","mdf2","chain"}) do
+    for _,ext in ipairs({"tex","mesh","mdf2","chain","mot"}) do
         for name,kind in pairs(equipment) do
             if name:lower():sub(-#ext-1)=="."..ext then
                 local path=platform[name] and "@"..name or name
@@ -1084,7 +1071,8 @@ function M.run(action,req,native)
                 else warming[key]=nil end
             end
         end
-        if equipment_batch and not equipment_pending then
+        if equipment_batch and not equipment_pending and
+                (not equipment_batch.village or not next(warming)) then
             local batch=equipment_batch
             local ok,pending=pcall(worn_armor.advance,batch,scene_components,equipment_refs,material_state,restore_when_ready)
             if not ok or not pending then
@@ -1139,7 +1127,14 @@ function M.run(action,req,native)
         -- must enumerate the scene again before it can publish any resources.
         local components_by_type={}
         local live={}
-        for _,p in ipairs(req.live_reentry or paths) do live[p:lower()]=true end
+        local armor_mesh_requested=false
+        for _,p in ipairs(req.live_reentry or paths) do
+            local key=p:lower()
+            live[key]=true
+            if key:match("^player/mod/.+%.mesh$") and not key:match("/[fm]_shadow%.mesh$") then
+                armor_mesh_requested=true
+            end
+        end
         local compound=#(req.live_reentry or paths)>1
         -- A whole-outfit swap changes the skeleton under an existing Chain.
         -- Its normal prefab creation can acquire the preloaded replacement.
@@ -1161,7 +1156,7 @@ function M.run(action,req,native)
         for _,path in ipairs(req.platform_files or {}) do
             local key=path:lower()
             local ext=key:match("%.([a-z0-9]+)$")
-            assert((ext=="tex" or ext=="mesh" or ext=="mdf2" or ext=="chain" or ext=="user") and not key:match("^streaming/"),
+            assert((ext=="tex" or ext=="mesh" or ext=="mdf2" or ext=="chain" or ext=="user" or ext=="mot") and not key:match("^streaming/"),
                 "Unexpected equipment platform path: "..path)
             if not (req.missing or {})[key] then
                 platform_paths[key]=true
@@ -1198,7 +1193,7 @@ function M.run(action,req,native)
                         end
                         -- A partially constructed outfit can temporarily have an
                         -- inactive component. Its prefab owns the whole new set.
-                        if live[owner.path:lower()] and not (compound and (ext=="mesh" or ext=="mdf2" or ext=="chain" or ext=="jcns"))
+                        if live[owner.path:lower()] and not ((compound or armor_mesh_requested) and (ext=="mesh" or ext=="mdf2" or ext=="chain" or ext=="jcns"))
                                 and go and not go:call("get_Update") then
                             local key=owner.path:lower()
                             owner.address=tostring(owner.old:read_qword(0x10))
@@ -1235,14 +1230,62 @@ function M.run(action,req,native)
         -- Replacing a mesh under a custom skeleton first instantiated by the
         -- game has terminated Rise after setters reported success. Keep the
         -- current renderers intact until the game rebuilds these equipment parts.
-        local deferred_paths
+        local shadow,shadow_reason,shadow_layout
+        if next(req.shadow_skeletons or {}) then
+            local manager=sdk.get_managed_singleton("snow.player.PlayerManager")
+            shadow,shadow_reason=shadow_skeleton.capture(manager and manager:call("findMasterPlayer"),req.shadow_skeletons)
+            shadow_layout=shadow
+            if shadow and shadow.changed>0 then
+                add_path(shadow.request)
+                if shadow.request~=shadow.canonical then add_path(shadow.canonical) end
+                equipment[shadow.request]=kinds.mesh[2]
+            else
+                shadow=nil
+            end
+        end
+        local chains,village
+        local chain_components={}
+        local rebuild=false
+        if next(armor_candidates) or shadow or next(physics_spec.chains or {}) then
+            chain_components=scene_components("via.motion.Chain",components_by_type)
+        end
+        if next(armor_candidates) then
+            local pm=sdk.get_managed_singleton("snow.player.PlayerManager")
+            local master=pm and pm:call("findMasterPlayer")
+            local hunter=master and master:call("get_GameObject")
+            rebuild=worn_armor.requires_model_rebuild(armor_candidates,live,chain_components,hunter,physics_spec.chains or {})
+        end
+        if not rebuild and (shadow or next(armor_candidates) or next(physics_spec.chains or {})) then
+            local protected=armor_candidates
+            if shadow then
+                protected={}
+                for id,row in pairs(armor_candidates) do protected[id]=row end
+                protected.shadow={go=shadow.root}
+            end
+            chains=worn_chain.capture(chain_components,
+                protected,physics_spec.chains or {},req.missing or {},equipment,physics_spec.chain_terminals or {})
+            if shadow and not (chains and chains:covers(protected.shadow)) then
+                shadow_reason="Could not observe the hunter's attached physics"
+                shadow=nil
+            end
+        end
+        local deferred_paths=rebuild and {} or nil
         for id,row in pairs(armor_candidates) do
-            if worn_armor.needs_reentry(row,armor_instances[id],armor_origins,startup) then
+            if not row.mesh.keep and worn_armor.needs_reentry(row,armor_instances[id],armor_origins,startup)
+                    and not (chains and chains:covers(row)) then
                 deferred_paths={}
                 break
             end
         end
         if deferred_paths then
+            village=require("MHRS_HotReload.village_equipment").capture(
+                armor_candidates,physics_spec,req.expected_materials or {},shadow_layout,req.missing or {})
+            for _,name in ipairs(names) do
+                local key=name:lower()
+                if physics_spec.chains and physics_spec.chains[key] and not (req.missing or {})[key] then
+                    equipment[name]=kinds.chain[2]
+                end
+            end
             local deferred={}
             for id,row in pairs(armor_candidates) do
                 armor_instance(id,row.go).defer=row.mesh.original
@@ -1251,7 +1294,11 @@ function M.run(action,req,native)
             for path in pairs(deferred) do deferred_paths[#deferred_paths+1]=path end
             table.sort(deferred_paths)
             armor_candidates={}
+            chains=nil
+            if shadow and not village then shadow_reason="Worn components require normal re-equip" end
+            shadow=nil
             if physics then physics.defer_live=true end
+            if village then deferred_paths=nil end
         end
         local f=assert(io.open("MHRS-Files-HotReload/asset-paths.txt","wb"))
         f:write(table.concat(names,"\n"),"\n")
@@ -1270,7 +1317,7 @@ function M.run(action,req,native)
                 end
             end
         end
-        if next(equipment) or physics then
+        if next(equipment) or physics or chains or village then
             local ok,batch=pcall(request_equipment,equipment,platform,req.expected_materials or {})
             if not ok then release_equipment();error(batch) end
             if physics then
@@ -1279,6 +1326,10 @@ function M.run(action,req,native)
                 batch.physics=physics
             end
             batch.candidates=armor_candidates
+            if armor_mesh_requested and next(armor_candidates) then batch.mesh_changes=live end
+            batch.chains=chains
+            batch.village=village
+            batch.shadow=shadow
             batch.loose=loose
             equipment_batch=batch
             equipment_pending=true
@@ -1326,7 +1377,8 @@ function M.run(action,req,native)
         end
         counts:close()
         return {results=results,factories=factory_count,equipment=equipment_pending,
-            equipment_bindings=deferred_paths and 0 or armor_count,deferred_equipment=deferred_paths,sleeping=next(sleeping)~=nil,
+            equipment_bindings=deferred_paths and 0 or armor_count,deferred_equipment=deferred_paths,
+            shadow_deferred=shadow_reason,sleeping=next(sleeping)~=nil,
             preview_targets=preview_targets}
     end
     if action=="asset_prefab_forget" then prefab_values[req.path:lower()]=nil;return {} end
@@ -1564,6 +1616,13 @@ function M.run(action,req,native)
             end
             error(err)
         end
+        if job.ext=="mot" then
+            -- The next layer requesting this path should share the published
+            -- platform generation even after the current waterwheel/actor leaves.
+            local old=platform_pins[job.path]
+            platform_pins[job.path]=job.platform and sdk.create_resource(job.kind[2],job.path) or nil
+            if old then old:release() end
+        end
         if job.ext=="uvs" then remember_gui_sequence(job,list,h) end
         job=nil
         return {state="committed",resource=address,bindings=#list}
@@ -1595,7 +1654,7 @@ function M.run(action,req,native)
     assert(state=="pending",state)
     job={kind=kind,ext=ext,path=list[1].path,old=list[1].old:read_qword(0x10),fresh=address,
         expected_outputs=ext=="jcns" and req.expected_outputs,expected_groups=ext=="chain" and req.expected_groups,
-        preserve=req.preserve,gui_owners=req.gui_owners}
+        preserve=req.preserve,gui_owners=req.gui_owners,platform=req.platform}
     if ext=="mdf2" then
         job.count=#list
         job.mdf_slots={}

@@ -1,7 +1,10 @@
 -- Change both resource holders on the existing render component in one game
 -- update. Keep the previous pair until a later update verifies the renderer.
 local M = {}
+local shadow_skeleton = require("MHRS_HotReload.shadow_skeleton")
 local extensions = {"mesh", "mdf2"}
+local recovering = {}
+local stopping = false
 
 local function address(holder)
     return holder and holder:read_qword(0x10)
@@ -21,6 +24,42 @@ function M.needs_reentry(row, instance, origins, startup)
     return startup[key] or startup[key:gsub("%.mesh$",".chain")] or false
 end
 
+local function belongs_to(go, root)
+    local tr=go and go:call("get_Transform")
+    while tr do
+        if tr:call("get_GameObject")==root then return true end
+        tr=tr:call("get_Parent")
+    end
+    return false
+end
+
+-- Even a mesh on a part with no Chain of its own can share the hunter's
+-- joint map with a sibling's running simulation (the stock Mei body does).
+function M.requires_model_rebuild(candidates, changed, components, hunter, incoming_chains)
+    local mesh_changed,foreign=false,false
+    for _,row in pairs(candidates) do
+        row.mesh.keep=not changed[row.mesh.path:lower()]
+        if not row.mesh.keep then
+            mesh_changed=true
+            if not hunter or not belongs_to(row.go,hunter) then foreign=true end
+        end
+    end
+    if not mesh_changed then return false end
+    if foreign or next(incoming_chains) then return true end
+    for _,comp in ipairs(components) do
+        if belongs_to(comp:call("get_GameObject"),hunter) then return true end
+    end
+    return false
+end
+
+local function physics_changed(batch, candidates)
+    if not batch.mesh_changes then return false end
+    local pm=sdk.get_managed_singleton("snow.player.PlayerManager")
+    local player=pm and pm:call("findMasterPlayer")
+    local hunter=player and player:call("get_GameObject")
+    return M.requires_model_rebuild(candidates,batch.mesh_changes,batch.scene_components("via.motion.Chain"),hunter,{})
+end
+
 function M.capture(comp, go, kinds, missing, resources, expected)
     local row = {comp=comp, go=go}
     for _, ext in ipairs(extensions) do
@@ -28,6 +67,7 @@ function M.capture(comp, go, kinds, missing, resources, expected)
         local holder = comp:call(kind[3])
         local path = holder and holder:call("get_ResourcePath")
         if not path or path == "" or missing[path:lower()] then return end
+        if ext=="mesh" and path:lower():match("/[fm]_shadow%.mesh$") then return end
         row[ext] = {kind=kind, path=path, original=address(holder)}
     end
     for _, ext in ipairs(extensions) do
@@ -88,8 +128,70 @@ local function restore(row, restore_when_ready)
     restore_when_ready({comp=row.comp, kind=row.mdf2.kind, switches=row.rollback_material})
 end
 
+local function restore_chains(batch, failures)
+    if batch.chains_paused then
+        local ok,reason=pcall(batch.chains.rollback,batch.chains)
+        if not ok then failures[#failures+1]=tostring(reason) end
+        batch.chains_paused=nil
+    end
+end
+
+-- The worker can time out or cancel an equipment request while the old mesh
+-- is still initializing. The game thread owns these holders and resumes
+-- the affected physics even if no more worker polls arrive.
+local function finish_recovery(batch, reason)
+    local failures=recovering[batch].failures
+    if reason then failures[#failures+1]=tostring(reason) end
+    restore_chains(batch, failures)
+    recovering[batch]=nil
+    if #failures>0 then
+        batch.rollback_error=table.concat(failures," / ")
+        if log then log.error("[MHRS-Files-HotReload] Shadow rollback: "..batch.rollback_error) end
+    end
+end
+
+function M.update_recoveries()
+    for batch,state in pairs(recovering) do
+        local ok,ready,reason=pcall(shadow_skeleton.verify_rollback,batch.shadow)
+        if ok and ready then finish_recovery(batch)
+        elseif not ok or ready==nil or os.clock()>=state.deadline then
+            finish_recovery(batch,(not ok and ready) or reason or "Timed out verifying the previous shadow skeleton")
+        end
+    end
+end
+
+if re then
+    re.on_application_entry("UpdateBehavior",M.update_recoveries)
+    re.on_script_reset(function()
+        stopping=true
+        for batch in pairs(recovering) do
+            finish_recovery(batch,"Script reset before previous shadow skeleton could be verified")
+        end
+    end)
+end
+
 function M.abort(batch, restore_when_ready, synchronous)
+    if batch.aborted then return end
+    batch.aborted=true
     local failures = {}
+    if batch.village then
+        local village = require("MHRS_HotReload.village_equipment")
+        if village.abort then
+            local ok,reason=pcall(village.abort,batch.village)
+            if not ok then failures[#failures+1]=tostring(reason) end
+        end
+    end
+    local wait_for_shadow=false
+    if batch.chains_paused then
+        local ok, reason = pcall(batch.chains.suspend_for_rollback, batch.chains)
+        if not ok then failures[#failures+1]=tostring(reason) end
+    end
+    if batch.shadow_bound then
+        local ok, reason, pending=pcall(shadow_skeleton.abort,batch.shadow)
+        if not ok or reason==false then failures[#failures+1]="Could not restore shadow skeleton: "..tostring(reason) end
+        wait_for_shadow=ok and reason==true and pending==true
+        batch.shadow_bound=nil
+    end
     if batch.physics then
         local ok,reason=pcall(batch.physics.abort,batch.physics)
         if not ok then failures[#failures+1]=tostring(reason) end
@@ -106,11 +208,20 @@ function M.abort(batch, restore_when_ready, synchronous)
                     if value ~= slot.fresh and value ~= slot.original then return end
                 end
             end
+            if current(row,"mesh")~=row.mesh.original then
+                assert(not physics_changed(batch,{row}),
+                    "[live equipment rejected] Restore deferred to normal equipment load after a hunter or physics change")
+            end
             restore(row, restore_when_ready)
         end)
         if not ok then failures[#failures+1] = tostring(err) end
     end
     batch.touched = nil
+    if wait_for_shadow and not stopping then
+        recovering[batch]={failures=failures,deadline=os.clock()+3}
+        return
+    end
+    restore_chains(batch,failures)
     assert(#failures == 0, table.concat(failures, " / "))
 end
 
@@ -127,19 +238,23 @@ local function stage(batch, components, resources, material_state)
                 -- resource reference and survives replacing that component.
                 local current_holder = comp:call(slot.kind[3])
                 local old_resource = assert(sdk.to_resource(sdk.to_ptr(slot.original)))
-                slot.old = assert(old_resource:create_holder(slot.kind[2] .. "Holder"))
+                slot.old = assert(old_resource:create_holder_global(slot.kind[2] .. "Holder"))
                 assert(slot.old:get_address() ~= current_holder:get_address() and address(slot.old) == slot.original,
                     "Could not pin current equipment resource: " .. slot.path)
-                local resource = assert(resources[slot.path], "Missing equipment resource: " .. slot.path)
-                slot.fresh = resource:get_address()
-                if not holders[slot.path] then
-                    local canonical = assert(sdk.create_resource(slot.kind[2], slot.path))
-                    local actual = canonical:get_address()
-                    canonical:release()
-                    assert(actual == slot.fresh, "Equipment resource changed: " .. slot.path)
-                    holders[slot.path] = resource:create_holder(slot.kind[2] .. "Holder")
+                if slot.keep then
+                    slot.holder,slot.fresh=slot.old,slot.original
+                else
+                    local resource = assert(resources[slot.path], "Missing equipment resource: " .. slot.path)
+                    slot.fresh = resource:get_address()
+                    if not holders[slot.path] then
+                        local canonical = assert(sdk.create_resource(slot.kind[2], slot.path))
+                        local actual = canonical:get_address()
+                        canonical:release()
+                        assert(actual == slot.fresh, "Equipment resource changed: " .. slot.path)
+                        holders[slot.path] = resource:create_holder_global(slot.kind[2] .. "Holder")
+                    end
+                    slot.holder = holders[slot.path]
                 end
-                slot.holder = holders[slot.path]
                 assert(address(slot.holder) == slot.fresh, "Incorrect equipment holder: " .. slot.path)
             end
             if comp:call("get_MaterialReady") then
@@ -178,10 +293,60 @@ local function verify(row)
 end
 
 function M.advance(batch, scene_components, resources, material_state, restore_when_ready)
-    if not next(batch.candidates) and not batch.physics then return false end
+    if next(recovering) then return true end
+    if batch.abort_reason then
+        error(batch.abort_reason..(batch.rollback_error and ("; rollback: "..batch.rollback_error) or ""))
+    end
+    if batch.village then
+        local village=require("MHRS_HotReload.village_equipment")
+        batch.village.resources=resources
+        batch.village.platform=batch.platform
+        local ok,pending=pcall(function()
+            if batch.physics and not batch.village_sources_ready then
+                batch.physics:stage()
+                batch.physics:bind()
+                assert(batch.physics:verify())
+                batch.village_sources_ready=true
+            end
+            return village.advance(batch.village,resources,scene_components)
+        end)
+        if not ok then
+            local restored,reason=pcall(M.abort,batch,restore_when_ready)
+            local message=tostring(pending)
+            if not message:find("[live equipment rejected]",1,true) then message="[live equipment rejected] "..message end
+            error(restored and message or (message.."; rollback: "..tostring(reason)))
+        end
+        return pending
+    end
+    if not next(batch.candidates) and not batch.physics and not batch.chains and not batch.shadow then return false end
     local synchronous = not batch.touched
     local ok, pending = pcall(function()
+        if batch.chains and not batch.chains_paused then
+            batch.chains:stage(resources)
+            batch.chains_paused=true
+            batch.chains:pause()
+            return true
+        end
+        if batch.shadow then
+            if not batch.shadow_bound then
+                batch.shadow_bound=true
+                assert(shadow_skeleton.bind(batch.shadow,resources[batch.shadow.request]))
+                batch.shadow_deadline=os.clock()+3
+                return true
+            end
+            if not batch.shadow_ready then
+                local ready, reason=shadow_skeleton.verify(batch.shadow)
+                if not ready then
+                    assert(ready~=nil and os.clock()<batch.shadow_deadline,reason)
+                    return true
+                end
+                batch.shadow_ready=true
+            end
+        end
         if synchronous then
+            batch.scene_components=scene_components
+            assert(not physics_changed(batch,batch.candidates),
+                "[live equipment rejected] Hunter or physics changed while equipment was loading")
             local staged = next(batch.candidates) and
                 stage(batch, scene_components("via.render.Mesh"), resources, material_state) or {}
             if batch.physics then batch.physics:stage(resources) end
@@ -195,7 +360,7 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
             end
             batch.deadline = os.clock() + 4
             local changed=batch.physics and batch.physics:bind()
-            return #staged>0 or changed==true
+            return #staged>0 or changed==true or batch.chains~=nil
         end
         for _, row in ipairs(batch.touched) do
             local ready, reason = verify(row)
@@ -211,6 +376,24 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
                 return true
             end
         end
+        if batch.chains then
+            if not batch.chain_bound then
+                batch.chains:bind()
+                batch.chain_bound=true
+                return true
+            end
+            if not batch.chain_resumed then
+                batch.chains:resume()
+                batch.chain_resumed=true
+                batch.chain_deadline=os.clock()+4
+                return true
+            end
+            local ready, reason=batch.chains:verify()
+            if not ready then
+                assert(os.clock()<batch.chain_deadline,reason)
+                return true
+            end
+        end
         for _, row in ipairs(batch.touched) do
             if live(row) and row.go:call("get_Update") then
                 restore_when_ready({comp=row.comp, kind=row.mdf2.kind, switches=row.switches})
@@ -219,8 +402,12 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
         return false
     end)
     if not ok then
+        local applied=batch.chains_paused or batch.shadow_bound
         local restored, failure = pcall(M.abort, batch, restore_when_ready, synchronous)
-        error(restored and pending or (tostring(pending) .. "; rollback: " .. tostring(failure)))
+        local reason=restored and tostring(pending) or (tostring(pending) .. "; rollback: " .. tostring(failure))
+        reason=(applied and "[live equipment rejected] " or "")..reason
+        if recovering[batch] then batch.abort_reason=reason;return true end
+        error(reason)
     end
     return pending
 end
