@@ -1,5 +1,7 @@
 -- Bind resources through their current scene or equipped component slots.
 local M = {}
+local worn_armor = require("MHRS_HotReload.worn_armor")
+local equipment_physics = require("MHRS_HotReload.equipment_physics")
 local kinds = {
     mesh={"via.render.Mesh","via.render.MeshResource","getMesh","setMesh"},
     chain={"via.motion.Chain","via.motion.ChainResource","get_ChainAsset","set_ChainAsset"},
@@ -333,21 +335,31 @@ re.on_application_entry("UpdateBehavior",function()
 end)
 
 local function user_field(root,edit)
+    local function invalid(why)
+        local ok,path=pcall(root.call,root,"get_Path")
+        error(string.format("%s: %s %s[%s].%s[%s]",why,ok and tostring(path) or "helmet USER",
+            tostring(edit.section),tostring(edit.index),tostring(edit.field),tostring(edit.element)))
+    end
     local target
     if edit.section=="face" then
-        assert(edit.field=="FullFace" or edit.field=="FullBody")
+        if edit.field~="FullFace" and edit.field~="FullBody" then invalid("Unknown face field") end
         target=root:get_field("_FaceInfo")
     elseif edit.section=="hair" then
         local arr=root:get_field("_HairInfo")
-        assert(edit.index>=0 and edit.index<arr:get_size(),"Hair entry unavailable")
+        if not arr or edit.index<0 or edit.index>=arr:get_size() then invalid("Hair entry unavailable") end
         target=arr[edit.index]
-        assert(edit.field=="HairShapeData" or edit.field=="HairDispOffParts" or edit.field=="HairDispOff" or edit.field=="HairChainStop")
-    else error("Unknown helm data section") end
-    assert(target,"Missing helm data entry")
+        if edit.field~="HairShapeData" and edit.field~="HairDispOffParts" and edit.field~="HairDispOff"
+                and edit.field~="HairChainStop" then invalid("Unknown hair field") end
+    else invalid("Unknown helm data section") end
+    if not target then invalid("Missing helm data entry") end
     if edit.field=="HairShapeData" then
         local arr=target:get_field(edit.field)
-        assert(edit.element>=0 and edit.element<arr:get_size(),"Hair shape element unavailable")
-        local function boxed() return assert(arr:call("GetValue(System.Int32)",edit.element)) end
+        if not arr or edit.element<0 or edit.element>=arr:get_size() then invalid("Hair shape element unavailable") end
+        local function boxed()
+            local value=arr:call("GetValue(System.Int32)",edit.element)
+            if not value then invalid("Hair shape value unavailable") end
+            return value
+        end
         return function() return boxed():get_field("mValue") end,function(v)
             arr:call("SetValue(System.Object, System.Int32)",sdk.create_single(v),edit.element)
         end
@@ -736,7 +748,20 @@ function M.active() return job~=nil or master~=nil end
 local sleeping={}
 local warming={}
 local equipment_refs={}
+-- A later prefab requests the ordinary spelling. Keep the indexed platform
+-- generation alive even when no render component has taken a reference yet.
+local platform_pins={}
 local equipment_pending=false
+local equipment_batch
+local armor_instances,armor_origins={},{}
+local function armor_instance(id,go)
+    local entry=armor_instances[id]
+    if not entry or entry.go~=go then
+        entry={go=go}
+        track_instance(armor_instances,id,entry)
+    end
+    return entry
+end
 local gui_sequences,gui_assets={},{}
 local next_gui_check,gui_scan=0,nil
 local check_preview_targets=true
@@ -844,6 +869,7 @@ end
 -- Enumerate once per pass. Spread ready views, their two object queries and
 -- individual UV bindings across frames, including on an unchanged HUD.
 re.on_application_entry("UpdateBehavior",function()
+    if not M.active() and not equipment_batch then equipment_physics.update(os.clock()) end
     if M.active() then gui_scan=nil;return end
     if check_preview_targets then
         check_preview_targets=false
@@ -894,9 +920,47 @@ re.on_application_entry("UpdateBehavior",function()
 end)
 
 local function release_equipment()
+    local restored,reason=true,nil
+    if equipment_batch then
+        local batch=equipment_batch
+        equipment_batch=nil
+        restored,reason=pcall(worn_armor.abort,batch,restore_when_ready)
+    end
     for _,resource in pairs(equipment_refs) do resource:release() end
     equipment_refs={}
     equipment_pending=false
+    assert(restored,reason)
+end
+
+local function request_equipment(equipment,platform,expected)
+    local batch={platform=platform,materials={}}
+    -- The first request after retirement determines the source for all users
+    -- of that spelling. Publish texture keys before the MDF requests them.
+    for _,ext in ipairs({"tex","mesh","mdf2","chain"}) do
+        for name,kind in pairs(equipment) do
+            if name:lower():sub(-#ext-1)=="."..ext then
+                local path=platform[name] and "@"..name or name
+                equipment_refs[name]=assert(sdk.create_resource(kind,path),"Could not load equipment: "..path)
+                if ext=="mdf2" then batch.materials[name]=expected[name:lower()] or false end
+            end
+        end
+    end
+    for _,file in ipairs({"equipment-paths.txt","equipment-platform.txt"}) do
+        local f=assert(io.open("MHRS-Files-HotReload/"..file,"wb"))
+        local ok,err=pcall(function()
+            for name,resource in pairs(equipment_refs) do
+                if file=="equipment-paths.txt" then
+                    if not name:lower():match("%.tex$") then assert(f:write(name,"\n")) end
+                elseif platform[name] then
+                    assert(f:write(name,"\t",tostring(resource:get_address()),"\n"))
+                end
+            end
+        end)
+        local closed,why=f:close()
+        assert(ok,err)
+        assert(closed,why)
+    end
+    return batch
 end
 
 local function equipment_factories(wanted,visit)
@@ -948,6 +1012,10 @@ function M.reset(native)
     if job then M.run("asset_abort",{},native) end
     while master do M.run("asset_master_abort",{},native) end
     release_equipment()
+    for _,resource in pairs(platform_pins) do resource:release() end
+    platform_pins={}
+    equipment_physics.reset()
+    armor_instances,armor_origins={},{}
     gui_scan=nil
     for group in pairs(prefab_generations) do group.resource:release() end
     prefab_generations={}
@@ -970,11 +1038,40 @@ function M.run(action,req,native)
         return {paths=found,notifications=notify_ready}
     end
     if action=="asset_awake" then return awakened(req.done or {}) end
+    if action=="asset_equipment_abort" then
+        release_equipment()
+        return {pending=false}
+    end
     if action=="asset_factories_ready" then
         if equipment_pending then
             local state=native("equipment_ready")
+            if state=="equipment platform source mismatch" then
+                local f=io.open("MHRS-Files-HotReload/equipment-wait.txt","rb")
+                local detail=f and f:read("*a") or state
+                if f then f:close() end
+                release_equipment()
+                return {pending=false,source_mismatch=detail~="" and detail or state}
+            end
+            if state=="invalid equipment material slots" then
+                release_equipment()
+                return {pending=false,source_mismatch="Could not read names from the loaded equipment MDF"}
+            end
             assert(state=="ready" or state=="pending",state)
             equipment_pending=state=="pending"
+            if not equipment_pending and equipment_batch then
+                local stream=io.open("MHRS-Files-HotReload/equipment-slots.txt","rb")
+                local reason="Equipment material slot report is unavailable"
+                if stream then
+                    local ok,value=pcall(worn_armor.check_sources,equipment_batch,equipment_refs,stream)
+                    stream:close()
+                    reason=ok and value or nil
+                    if not ok then reason=tostring(value) end
+                end
+                if reason then
+                    release_equipment()
+                    return {pending=false,source_mismatch=reason}
+                end
+            end
         end
         for key,entry in pairs(warming) do
             local factory=entry.factory
@@ -987,32 +1084,92 @@ function M.run(action,req,native)
                 else warming[key]=nil end
             end
         end
-        return {pending=equipment_pending or next(warming)~=nil}
+        if equipment_batch and not equipment_pending then
+            local batch=equipment_batch
+            local ok,pending=pcall(worn_armor.advance,batch,scene_components,equipment_refs,material_state,restore_when_ready)
+            if not ok or not pending then
+                if ok then
+                    if batch.physics then batch.physics:commit() end
+                    for _,row in ipairs(batch.touched or {}) do
+                        if row.mesh.fresh~=row.mesh.original then
+                            local entry=armor_instance(row.comp:get_address(),row.go)
+                            entry.direct,entry.defer=row.mesh.fresh,nil
+                        end
+                    end
+                    local updated={}
+                    for name,res in pairs(equipment_refs) do
+                        local key=name:lower()
+                        if key:match("%.mesh$") then
+                            local loose=batch.loose[key] or batch.loose[key:gsub("%.mesh$",".chain")] or false
+                            updated[key]=updated[key] or {}
+                            updated[key][res:get_address()]=loose
+                        end
+                    end
+                    for key,origins in pairs(updated) do armor_origins[key]=origins end
+                    for name in pairs(batch.platform) do
+                        platform_pins[name]=equipment_refs[name]
+                        equipment_refs[name]=nil
+                    end
+                end
+                equipment_batch=nil
+                release_equipment()
+            end
+            if not ok then error(pending) end
+        end
+        return {pending=equipment_pending or equipment_batch~=nil or next(warming)~=nil}
     end
     if action=="asset_removed" then
         assert(not M.active(),"Resource transaction active")
         local paths=assert(req.paths)
         if #paths==0 then return {results={}} end
+        release_equipment()
         local names,seen,by_ext={},{},{}
         local warm,dormant={},{}
         local equipment,retiring_visuals,preview_targets={},{},{}
+        local physics_spec=req.physics or {}
+        local physics
+        if next(physics_spec.helmets or {}) then
+            physics=equipment_physics.new(physics_spec,parts,user_field)
+        end
+        local armor_candidates,armor_count={},0
+        local startup,loose={},{}
+        for _,name in ipairs(req.startup_equipment or {}) do startup[name:lower()]=true end
+        for _,name in ipairs(req.loose_equipment or {}) do loose[name:lower()]=true end
         -- Synchronous discovery only. A later frame, bind or player rebuild
         -- must enumerate the scene again before it can publish any resources.
         local components_by_type={}
         local live={}
         for _,p in ipairs(req.live_reentry or paths) do live[p:lower()]=true end
         local compound=#(req.live_reentry or paths)>1
+        -- A whole-outfit swap changes the skeleton under an existing Chain.
+        -- Its normal prefab creation can acquire the preloaded replacement.
         local function add(name)
             if not seen[name] then seen[name]=true;names[#names+1]=name end
         end
-        for _,path in ipairs(paths) do
+        local platform_paths,retired_paths={},{}
+        local function add_path(path)
             add(path)
+            retired_paths[path:lower()]=true
             for _,alias in ipairs((req.aliases or {})[path] or {}) do
                 if alias:lower()==path:lower() then add(alias) end
             end
             local ext=path:lower():match("%.([a-z0-9]+)$")
             by_ext[ext]=by_ext[ext] or {}
             by_ext[ext][path:lower()]=true
+        end
+        for _,path in ipairs(paths) do add_path(path) end
+        for _,path in ipairs(req.platform_files or {}) do
+            local key=path:lower()
+            local ext=key:match("%.([a-z0-9]+)$")
+            assert((ext=="tex" or ext=="mesh" or ext=="mdf2" or ext=="chain" or ext=="user") and not key:match("^streaming/"),
+                "Unexpected equipment platform path: "..path)
+            if not (req.missing or {})[key] then
+                platform_paths[key]=true
+                add_path(path)
+            end
+        end
+        for name in pairs(platform_pins) do
+            if retired_paths[name:lower()] then add(name) end
         end
         for ext,wanted in pairs(by_ext) do
             if kinds[ext] and ext~="user" then
@@ -1028,12 +1185,15 @@ function M.run(action,req,native)
                             previous[ext]=tostring(owner.old:read_qword(0x10))
                             retiring_visuals[id]=previous
                         end
-                        if live[owner.path:lower()] and go and go:call("get_Update") and
+                        if go and go:call("get_Update") and
                                 (ext=="mesh" or ext=="mdf2") and owner.path:lower():match("^player/mod/") then
-                            for _,kind in ipairs({kinds.mesh,kinds.mdf2}) do
-                                local h=owner.comp:call(kind[3])
-                                local name=h and h:call("get_ResourcePath")
-                                if name and not (req.missing or {})[name:lower()] then equipment[name]=kind[2] end
+                            local id=owner.comp:get_address()
+                            if not armor_candidates[id] then
+                                local row=worn_armor.capture(owner.comp,go,kinds,req.missing or {},equipment,req.expected_materials or {})
+                                if row then
+                                    armor_candidates[id]=row
+                                    armor_count=armor_count+1
+                                end
                             end
                         end
                         -- A partially constructed outfit can temporarily have an
@@ -1072,11 +1232,57 @@ function M.run(action,req,native)
                 end
             end
         end
+        -- Replacing a mesh under a custom skeleton first instantiated by the
+        -- game has terminated Rise after setters reported success. Keep the
+        -- current renderers intact until the game rebuilds these equipment parts.
+        local deferred_paths
+        for id,row in pairs(armor_candidates) do
+            if worn_armor.needs_reentry(row,armor_instances[id],armor_origins,startup) then
+                deferred_paths={}
+                break
+            end
+        end
+        if deferred_paths then
+            local deferred={}
+            for id,row in pairs(armor_candidates) do
+                armor_instance(id,row.go).defer=row.mesh.original
+                deferred[row.mesh.path],deferred[row.mdf2.path]=true,true
+            end
+            for path in pairs(deferred) do deferred_paths[#deferred_paths+1]=path end
+            table.sort(deferred_paths)
+            armor_candidates={}
+            if physics then physics.defer_live=true end
+        end
         local f=assert(io.open("MHRS-Files-HotReload/asset-paths.txt","wb"))
         f:write(table.concat(names,"\n"),"\n")
         f:close()
         local state=native("forget_batch")
         assert(state=="retired batch",state)
+        local platform={}
+        for _,name in ipairs(names) do
+            local old=platform_pins[name]
+            if old then old:release();platform_pins[name]=nil end
+            if platform_paths[name:lower()] then
+                local ext=name:lower():match("%.([a-z0-9]+)$")
+                if ext~="user" then
+                    equipment[name]=kinds[ext][2]
+                    platform[name]=true
+                end
+            end
+        end
+        if next(equipment) or physics then
+            local ok,batch=pcall(request_equipment,equipment,platform,req.expected_materials or {})
+            if not ok then release_equipment();error(batch) end
+            if physics then
+                local loaded,why=pcall(physics.request,physics,platform_paths,req.missing or {})
+                if not loaded then release_equipment();error(why) end
+                batch.physics=physics
+            end
+            batch.candidates=armor_candidates
+            batch.loose=loose
+            equipment_batch=batch
+            equipment_pending=true
+        end
         if by_ext.uvs then
             for path in pairs(by_ext.uvs) do gui_sequences[path]=nil end
             update_gui_assets()
@@ -1091,18 +1297,6 @@ function M.run(action,req,native)
                 track_instance(retired_visuals,id,entry)
             end
             deferred_materials[id]=nil
-        end
-        if next(equipment) then
-            local f=assert(io.open("MHRS-Files-HotReload/equipment-paths.txt","wb"))
-            local fresh={}
-            for name,kind in pairs(equipment) do
-                fresh[name]=sdk.create_resource(kind,name)
-                if fresh[name] then f:write(name,"\n") end
-            end
-            f:close()
-            release_equipment()
-            equipment_refs=fresh
-            equipment_pending=next(fresh)~=nil
         end
         -- A ready via.Prefab can retain its previous serialized hierarchy even
         -- after the resource key is retired. Reopen the existing factory as
@@ -1131,7 +1325,8 @@ function M.run(action,req,native)
             results[i]={path=path,state=n>0 and "retired" or "not cached",generations=n}
         end
         counts:close()
-        return {results=results,factories=factory_count,equipment=equipment_pending,sleeping=next(sleeping)~=nil,
+        return {results=results,factories=factory_count,equipment=equipment_pending,
+            equipment_bindings=deferred_paths and 0 or armor_count,deferred_equipment=deferred_paths,sleeping=next(sleeping)~=nil,
             preview_targets=preview_targets}
     end
     if action=="asset_prefab_forget" then prefab_values[req.path:lower()]=nil;return {} end
@@ -1245,11 +1440,12 @@ function M.run(action,req,native)
     if action=="asset_abort" then
         if not job then return {state="idle"} end
         local restore_error
-        if job.effects then
-            for _,b in ipairs(job.effects) do
+        if job.effects or job.chains then
+            for _,b in ipairs(job.effects or job.chains) do
                 local ok,err=pcall(function()
                     local go=b.comp:call("get_GameObject")
-                    if go and go:call("get_Valid") then
+                    if go and go:call("get_Valid") and
+                            (not job.chains or tostring(holder(b):read_qword(0x10))==job.fresh) then
                         assign(b,b.old)
                         if b.restart then b.comp:call("set_Action",1) end
                     end
@@ -1276,12 +1472,19 @@ function M.run(action,req,native)
             assert(state=="outputs" and tonumber(outputs)==job.expected_outputs,
                 "JCNS output count differs from the loose file. Turn off LooseFileLoader > Debug > Enable file cache and save again.")
         end
-        if job.effects then
-            for _,b in ipairs(job.effects) do
+        if job.effects or job.chains then
+            local pending_bindings=job.effects or job.chains
+            for _,b in ipairs(pending_bindings) do
                 local h=holder(b)
                 if not h or tostring(h:read_qword(0x10))~=job.fresh then return {state="pending"} end
+                if job.chains and job.expected_groups and
+                        (b.comp:call("get_ResourceGroupCount")~=job.expected_groups or
+                         b.comp:call("getGroupCount")~=job.expected_groups) then
+                    assert(os.clock()<job.chain_deadline,"Chain groups differ from "..job.path)
+                    return {state="pending"}
+                end
             end
-            local count,address=#job.effects,job.fresh
+            local count,address=#pending_bindings,job.fresh
             assert(native("commit")=="committed")
             job=nil
             return {state="committed",resource=address,bindings=count}
@@ -1313,6 +1516,23 @@ function M.run(action,req,native)
         local h=res:create_holder(holder_type)
         res:release()
         assert(h and address==job.fresh,"Cache resource mismatch")
+        if job.ext=="chain" then
+            -- A standalone chain change leaves the model in place. Check the
+            -- new resource and simulated groups after the engine update.
+            for _,b in ipairs(list) do
+                local ptr=b.old:read_qword(0x10)
+                local old=assert(sdk.to_resource(sdk.to_ptr(ptr)))
+                b.old=assert(old:create_holder(holder_type))
+                assert(b.old:read_qword(0x10)==ptr,"Could not pin current chain")
+            end
+            job.chains,job.chain_deadline={},os.clock()+4
+            job.holder=h
+            for _,b in ipairs(list) do
+                job.chains[#job.chains+1]=b
+                assign(b,h)
+            end
+            return {state="pending"}
+        end
         if job.ext=="efx" then
             job.effects={}
             job.holder=h
@@ -1374,7 +1594,8 @@ function M.run(action,req,native)
     local state,address=native("asset")
     assert(state=="pending",state)
     job={kind=kind,ext=ext,path=list[1].path,old=list[1].old:read_qword(0x10),fresh=address,
-        expected_outputs=ext=="jcns" and req.expected_outputs,preserve=req.preserve,gui_owners=req.gui_owners}
+        expected_outputs=ext=="jcns" and req.expected_outputs,expected_groups=ext=="chain" and req.expected_groups,
+        preserve=req.preserve,gui_owners=req.gui_owners}
     if ext=="mdf2" then
         job.count=#list
         job.mdf_slots={}

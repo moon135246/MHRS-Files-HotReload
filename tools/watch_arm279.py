@@ -10,9 +10,11 @@ import uuid
 from pathlib import Path
 
 # Embedded Python on the modding workstation omits the script's directory.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 from file_changes import DirectoryChanges
 from material_layout import MaterialValidator, materials
+from watcher_runtime import checkpoint
 LOGICAL = "player/mod/f/pl279/f_arm279.mdf2"
 
 
@@ -43,6 +45,7 @@ def command(channel, action, **payload):
         # while letting simultaneous watcher and observer requests hand off promptly.
         deadline = time.monotonic() + 10
         while True:
+            checkpoint()
             try:
                 msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
                 break
@@ -71,6 +74,7 @@ def exchange(channel, action, payload):
         deadline = time.monotonic() + 8
         next_read = time.monotonic() + .1
         while time.monotonic() < deadline:
+            checkpoint()
             timeout = max(0, min(deadline, next_read) - time.monotonic())
             if changes:
                 try:

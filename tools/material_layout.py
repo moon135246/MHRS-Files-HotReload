@@ -1,9 +1,9 @@
 """Read the material-facing tables in Rise MDF v23 and MMTR v220427553."""
-import gzip
 import json
 import struct
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from watcher_runtime import index_path, open_index
 
 
 @dataclass
@@ -166,7 +166,7 @@ class UnverifiedTemplate(ValueError):
     """An existing slot changed to a packaged shader unavailable for live validation."""
 
 
-SHADER_INDEX = Path(__file__).with_name("rise-16.0.2-shaders.json.gz")
+SHADER_INDEX = index_path("rise-16.0.2-shaders.json.gz")
 
 
 def check_layout(material, layout):
@@ -190,7 +190,7 @@ class MaterialValidator:
         self.root = root
         self.baseline = baseline
         self.shaders = {}
-        with gzip.open(SHADER_INDEX, "rt", encoding="utf-8") as src:
+        with open_index(SHADER_INDEX) as src:
             self.packaged_shaders = {p: (set(sizes), {tuple(v) for v in params}, set(textures))
                                      for p, (sizes, params, textures) in json.load(src).items()}
 

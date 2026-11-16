@@ -7,6 +7,39 @@ import struct
 import time
 
 
+POLL_INTERVAL = 2.0
+
+
+class FileChangeTimes:
+    """NTFS ChangeTime also advances on writes that preserve size and LastWriteTime."""
+    def __init__(self):
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.open = kernel.CreateFileW
+        self.open.argtypes = w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE
+        self.open.restype = w.HANDLE
+        self.query = kernel.GetFileInformationByHandleEx
+        self.query.argtypes = w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD
+        self.query.restype = w.BOOL
+        self.close = kernel.CloseHandle
+        self.close.argtypes = (w.HANDLE,)
+
+    def read(self, path):
+        # FILE_READ_ATTRIBUTES only; preserve the installer's read/write/delete sharing.
+        handle = self.open(str(path), 0x80, 7, None, 3, 0, None)
+        if handle == ctypes.c_void_p(-1).value:
+            return None
+        try:
+            return self.read_handle(handle)
+        finally:
+            self.close(handle)
+
+    def read_handle(self, handle):
+        info = (ctypes.c_longlong * 5)()  # FILE_BASIC_INFO, including trailing padding
+        if self.query(handle, 0, ctypes.byref(info), ctypes.sizeof(info)):
+            return info[3]
+        return None
+
+
 class Overlapped(ctypes.Structure):
     _fields_ = [("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t),
                 ("Offset", w.DWORD), ("OffsetHigh", w.DWORD), ("event", w.HANDLE)]
@@ -97,19 +130,24 @@ class LooseChanges:
         self.root = root
         self.parent = root.parent
         self.tree, self.gate = None, None
+        self.next_parent_check = 0
+        self.parent_identity = None
         # Watch the containing directory so replacing 'stm' itself cannot leave
         # a handle attached to the old tree. The game directory only needs a
         # nonrecursive directory-name subscription for removal of 'natives'.
         if anchor != self.parent:
             if anchor != self.parent.parent:
                 raise ValueError("Unexpected loose directory anchor")
-            self.gate = DirectoryChanges(anchor, recursive=False, mask=2)
+            try:
+                self.gate = DirectoryChanges(anchor, recursive=False, mask=2)
+            except OSError as error:
+                print("Game directory notifications unavailable:", error, flush=True)
         try:
             self.open_tree()
         except BaseException:
             self.close()
             raise
-        dll = (self.gate or self.tree).dll
+        dll = ctypes.WinDLL("kernel32", use_last_error=True)
         self.wait = dll.WaitForMultipleObjects
         self.wait.argtypes = w.DWORD, ctypes.POINTER(w.HANDLE), w.BOOL, w.DWORD
         self.wait.restype = w.DWORD
@@ -118,14 +156,31 @@ class LooseChanges:
         if self.tree:
             self.tree.close()
             self.tree = None
+        self.parent_identity = self.get_parent_identity()
         try:
             self.tree = DirectoryChanges(self.parent)
         except FileNotFoundError:
-            if not self.gate:
-                raise
+            pass
+        except OSError as error:
+            print("Loose directory notifications unavailable, using scheduled scans:", error, flush=True)
+
+    def get_parent_identity(self):
+        try:
+            st = self.parent.stat()
+            return st.st_dev, st.st_ino
+        except OSError:
+            return None
 
     def poll(self, timeout):
+        if not self.gate and time.monotonic() >= self.next_parent_check:
+            self.next_parent_check = time.monotonic() + 1
+            if self.get_parent_identity() != self.parent_identity:
+                self.open_tree()
+                return set(), set(), True
         watches = [watch for watch in (self.gate, self.tree) if watch]
+        if not watches:
+            time.sleep(timeout)
+            return set(), set(), False
         handles = (w.HANDLE * len(watches))(*(watch.op.event for watch in watches))
         index = self.wait(len(handles), handles, False, int(timeout * 1000 + .5))
         if index == 258:
@@ -133,19 +188,20 @@ class LooseChanges:
         if index >= len(handles):
             raise ctypes.WinError(ctypes.get_last_error())
         watch = watches[index]
+        try:
+            paths, structural, overflow = watch.poll(0)
+        except OSError:
+            if watch is self.gate:
+                self.gate.close()
+                self.gate = None
+            else:
+                self.open_tree()
+            return set(), set(), True
         if watch is self.gate:
-            paths, _, overflow = watch.poll(0)
             if overflow or self.parent in paths:
                 self.open_tree()
                 return set(), set(), True
             return set(), set(), False
-        try:
-            paths, structural, overflow = watch.poll(0)
-        except OSError as error:
-            if not self.gate or error.winerror not in (3, 5, 6):
-                raise
-            self.open_tree()
-            return set(), set(), True
         inside = {p for p in paths if p == self.root or self.root in p.parents}
         return inside, structural & inside, overflow
 
@@ -207,26 +263,58 @@ def snapshots(root, files, signature, suffixes, anchor=None):
                 count_parents(file, 1)
         return entries
 
+    change_times = None
+
+    def polling_stamps(entries):
+        nonlocal change_times
+        if os.name != "nt":
+            return {}
+        if change_times is None:
+            change_times = FileChangeTimes()
+        return {file: change_times.read(file) for file in entries}
+
     try:
         # Arm before enumeration so copies made during the initial walk follow
         # the startup snapshot. Never mutate snapshots held by the consumer.
         current = reconcile()
+        stamps = polling_stamps(current) if not notifications or not notifications.tree else {}
+        next_scan = time.monotonic() + POLL_INTERVAL
         while True:
             timeout = yield current
             timeout = max(0.0, timeout or 0.0)
-            if not notifications:
-                time.sleep(min(timeout, .2))
+            if notifications:
+                paths, structural, overflow = notifications.poll(timeout)
+            else:
+                time.sleep(timeout)
+                paths, structural, overflow = set(), set(), False
+            if not notifications or (not notifications.tree and not overflow):
+                started = time.monotonic()
+                if started < next_scan:
+                    continue
+                sequence += 1
                 refreshed = scan(root)
+                new_stamps = polling_stamps(refreshed)
+                # A polling scan only publishes actual changes. A previous
+                # notification generation survives as long as its file does.
+                for file in refreshed.keys() & current.keys():
+                    stamp = new_stamps.get(file)
+                    if refreshed[file][0] == current[file][0] and (
+                            stamp is None or stamps.get(file) is None or stamp == stamps[file]):
+                        refreshed[file] = current[file]
+                stamps = new_stamps
+                finished = time.monotonic()
+                next_scan = finished + max(POLL_INTERVAL, 4 * (finished - started))
                 if refreshed != current:
                     current = refreshed
                 continue
-            paths, structural, overflow = notifications.poll(timeout)
             if not paths and not overflow:
                 continue
             sequence += 1
             if overflow:
                 # Windows no longer knows which timestamps may have been preserved.
                 current = reconcile()
+                if not notifications.tree:
+                    stamps = polling_stamps(current)
                 continue
             # Moving a whole directory need not emit events for its children.
             live_dirs = {p for p in structural if p.is_dir()}
