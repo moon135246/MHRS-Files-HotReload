@@ -1,9 +1,9 @@
 """Index loose Rise resource references and map versioned filenames to logical paths."""
-import gzip
 import json
 import re
 from collections import defaultdict
 from pathlib import Path
+from watcher_runtime import index_path, open_index
 
 
 # Stock UV sequences used by Rise's preview windows. Each sequence contains
@@ -36,7 +36,7 @@ def resource_paths(raw, *, preserve_case=False):
 
 REFERENCE_SUFFIXES = (".pfb.17", ".user.2", ".gui.430033", ".mdf2.23", ".efx.2818730",
                       ".motlist.528", ".motbank.3", ".uvs.7", ".uvs.7.stm")
-INDEX = Path(__file__).with_name("rise-16.0.2-links.json.gz")
+INDEX = index_path("rise-16.0.2-links.json.gz")
 
 _PREVIEW_DIR = "camera/texture/rendertarget/"
 _PREVIEW_LINKS = {_PREVIEW_DIR + uv + ".uvs": {_PREVIEW_DIR + camera + ".rtex", _PREVIEW_DIR + camera + "_uw.rtex"}
@@ -158,7 +158,7 @@ class ResourceLinks:
         self.packaged = {}
         self.stock_parents = defaultdict(set)
         self.stock_aliases = defaultdict(set)
-        with gzip.open(INDEX, "rt", encoding="utf-8") as src:
+        with open_index(INDEX) as src:
             for owner, references in json.load(src).items():
                 parent = owner.lower()
                 self.stock_aliases[parent].add(owner)

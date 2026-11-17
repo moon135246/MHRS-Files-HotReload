@@ -1,15 +1,31 @@
-# MHRS-Files-HotReload 1.0.0
+# MHRS-Files-HotReload 1.1.0
 
-《怪物猎人：崛起》松散资源热加载工具。游戏运行时可以直接用 B 套覆盖同路径的 A 套，也可以删除松散文件并在下次使用时读取 PAK 原件。支持 18 类资源。实测环境为 Steam 16.0.2.0、Build 17920865、REFramework c4b13148。
+《怪物猎人：崛起》松散资源热加载工具。在村庄、训练场和进行中的任务里，安装当前穿戴装备的外观、换成另一套或卸载，插件会更新本地猎人。训练场及进行中的任务里，拔刀、瞄准、移动和耐力变化不再推迟原猎人身上的防具刷新。玩家包只有一个 DLL，可搭配原版 Lua Bone System 或 FirstNatives。各类贴图、材质、模型、动作等共 18 类资源的刷新时机见下表。实测环境为 Steam 16.0.2.0、Build 17920865、REFramework c4b13148。
 
 本项目在开发过程中借鉴了 Stellar 的《怪物猎人：荒野》热加载工具，尤其是文件监听、同路径资源重载和场景刷新。感谢作者公开实现，供崛起版开发时对照。[荒野热加载项目](https://github.com/AleksKavil/MHWS-Files-HotReload) · [致谢](#致谢)
 
+[下载 1.1.0 玩家安装包](https://github.com/moon135246/MHRS-Files-HotReload/releases/download/v1.1.0/MHRS-Files-HotReload-v1.1.0.zip) · [1.0.1 至 1.1.0 更新记录](CHANGELOG.md)
+
 ## 安装与实测范围
 
-1. 先安装崛起版 REFramework，并启用 **LooseFileLoader**。更新旧版时先退出游戏，停止原来手动运行的 Python 监听器。
-2. 下载 `MHRS-Files-HotReload-v1.0.0.zip`，将完整 ZIP 拖入 Fluffy Mod Manager，或放入 Fluffy 的 `Games/MHRISE/Mods` 后刷新列表。选择 **Monster Hunter Rise**，启用 **MHRS-Files-HotReload**。[v1.0.0 玩家安装包](https://github.com/moon135246/MHRS-Files-HotReload/releases/tag/v1.0.0)
-3. 启动游戏。插件会自动启动随包的 Windows x64 监听器。要在游戏运行中新增或删除松散文件，在 REFramework 的 **LooseFileLoader → Debug** 中关闭 **Enable file cache**。实测版本重启游戏后会重新勾选此项。
-4. 保存或删除 `natives/stm` 下的资源。监听状态可在游戏目录的 `reframework/data/MHRS-Files-HotReload/watcher.log` 中查看。退出游戏时监听器一并结束，此时可在 Fluffy 中停用或更新插件。
+1.1.0 用当前猎人、已登记的防具和资源依赖判断何时刷新。部分防具、整套以及脚本重置后的装配恢复都走原猎人挂点。换场收到的部分防具变更也能按新猎人的实穿路径重试。一次复制多个资源时，按使用者分组，已就绪的组件可以先更新。具体格式、保留差异及实测范围见[荒野源码对照](docs/wilds-parity.md)。
+
+1.0.9 按当前猎人和实际防具挂点判断原位换装。部分任务的开场演出标志在正式狩猎时仍为真，现可在这类任务中刷新。场景切换期间收到整套文件变更时，插件等待新猎人的五件挂点，重新核对所穿资源，再使用新场景的挂点装配。
+
+1.0.8 沿用荒野处理缺失材质依赖的方式。穿戴装备的 MDF 等待自定义 MMTR 超时，且对应模板在松散目录与游戏 PAK 中都找不到时，监听日志会输出 `Missing MMTR` 和所缺文件的路径。装入对应材质前置，或更换、卸载这套外观，插件会重新处理这次换装。等待期间，单独保存的其他资源仍可刷新。「梅」「天狐」使用的 Moon 模板来自单独的 Moon_Rise 前置。
+
+1.0.7 在原猎人装配和单件顶点换绑之前检查场景、装备身份与资源就绪。该版本曾对界面输入和整名猎人重建设置额外条件。1.1.0 已移除这两个入口限制。
+
+1.0.6 使用猎人当前装备请求选择游戏自己的防具预制体，把新部件装到原猎人的 Transform 下。游戏登记新件后，插件核对材质、局部关节和活动 CHAIN，再让旧件退场。收刀站稳后可以直接装梅、切天狐或卸载，武器和箭囊保留在身上。首次安装也可以在游戏启动后进行。[原猎人挂点的实机验收](docs/worn-skeletons.md#原猎人的五个防具挂点)
+
+训练场里，原装 Lua Bone System 和 FirstNatives 各用十四类武器完成了装梅、切天狐、卸载，共 84 次。任务内另行核对了 FirstNatives 的废神社单人探索（太刀）和原装 Lua 的水没林普通狩猎（操虫棍）。水没林的三次切换耗时 2.72、3.81、3.00 秒，均从最后一个文件落盘计到目标资源可见，操虫棍和猎虫全程保留。[训练场与任务实测](docs/quest-equipment.md)
+
+整套五件已确认穿在本地主控身上时，插件会一直按原猎人的挂点装配。防具部件或共享工厂仍在准备时，等它们就绪后再试。独立隐藏脸发、复杂头盔规则或关节层级不相容时，装配可能要等游戏下一次正常穿戴。单独改动部分装备、强制重置脚本时中断了 FirstNatives 影骨交接，有各自的兼容和恢复路径。[适用范围与实测](docs/worn-skeletons.md#原猎人的五个防具挂点)
+
+1. 安装崛起版 REFramework。普通外观和 Lua Bone System 使用 REFramework 的 **LooseFileLoader**。使用 FirstNatives 时，关闭这个开关，让 FirstNatives 负责读取松散文件。使用 Lua Bone System 的玩家可以继续使用自己的 LuaBoneSystem.lua。热加载适配随本插件的 DLL 提供。从 1.0.0 升级时，先退出游戏，在 Fluffy 中停用旧版并结束之前手动运行的监听器。手动安装过旧版的玩家需先移出其 `MHRS_Files_HotReload.lua`、`MHRS_HotReload` 脚本目录和旧版的辅助程序。
+2. 将 `MHRS-Files-HotReload-v1.1.0.zip` 拖入 Fluffy，在 **Monster Hunter Rise** 中启用。手动安装时，用包内的 `reframework/plugins/mhrs_hotreload.dll` 更新游戏里同名的 DLL。
+3. 启动游戏，保存、安装或卸载 `natives/stm` 下的外观。DLL 在游戏进程内监听变动，记录写在 `reframework/data/MHRS-Files-HotReload/watcher.log`。日志中的 `Watching` 表示已取得启动基线。
+4. 插件使用崛起的平台文件名读取运行后才放入的装备模型、材质及贴图。在 NTFS 上，它为松散原件临时创建同数据的 `.stm` 硬链接。卸载启动前就已装入的外观时，插件按本机 PAK 的补丁优先次序读取原件，验证后可暂存为独立的 `.stm` 副本，供本局再次创建装备。监听器正常停止时会清理插件拥有的条目。游戏进程先退出时，遗留条目在插件下次启动、采集基线前清理。发生路径冲突时保留其他模组的文件，日志记下冲突路径。
 
 v1.0.0 安装包已用 Fluffy 在 Steam 版崛起实测。村内覆盖 279 装备的贴图后，角色身上出现了测试用的洋红色。新增、覆盖和删除水车动作文件时，同一水车的动作末帧依次为 239、119、89、239。279 腰甲约束在新增和覆盖后由 4 项变为 3 项、2 项，删除后在重建装备时恢复 4 项。
 
@@ -17,13 +33,21 @@ v1.0.0 安装包已用 Fluffy 在 Steam 版崛起实测。村内覆盖 279 装�
 
 道具箱的单件外观预览会在小窗相机重新启用时校准渲染目标。关闭预览后再替换或删除资源，重新打开时，单件小窗与整身预览各自使用当前目标。
 
-开发者从源码运行时可手动部署仓库中的 `reframework`，然后执行 `python tools/watch_outfit.py "<游戏目录>"`。同一游戏目录只运行一个监听器。下文的 Python 命令用于源码开发和实机复测。构建玩家包使用 Windows x64 Python 3.12、PyInstaller 6 和 Visual Studio C++ x64 工具链，运行 `python tools/build_player_package.py dist/MHRS-Files-HotReload-v1.0.0.zip`。
+构建单 DLL 玩家包需要 Windows x64、Python 3.12、Git 和 Visual Studio C++ x64 工具链。运行 `python tools/build_player_package.py dist/MHRS-Files-HotReload-v1.1.0.zip`。构建脚本取用固定版本的静态 CPython SDK 和 REFramework 的 Lua 源码，将监听器、脚本及资源索引一并链接进 DLL。下文的 Python 命令供源码开发与历史用例复测，手动监听和玩家 DLL 应分别运行。
 
-Windows 监听器在启动时扫描一次，随后等待目录变更通知。游戏端的 `request_watch.dll` 让脚本在有新请求时才读取 JSON。预制体回收和已修改 HUD 的重新绑定分帧执行。村内移动和训练场出招的帧时间、后台开销及复测结果见[性能对照](docs/performance.md)。
+首次构建会将依赖缓存到 `native/build`。本地已有对应版本时，传入 `--python-sdk <已解压的SDK目录> --reframework-source <REFramework检出目录> --zstd-source <Zstandard 1.5.7源码目录>` 可离线构建。`--verify` 在独立宿主验证单 DLL 的启动、文件变更、PAK 回退与退出，`--verify-texture <TEX文件>` 可加入真实纹理样本。使用独立进程从源码读取 PAK 需要安装 `zstandard`，`--external-watcher` 构建这一对照版本另需 PyInstaller 6。
+
+监听器优先使用 Windows 目录变更通知。游戏进程拒绝订阅父目录时，插件定期核对该目录，能订阅的子目录仍使用通知。预制体回收和已修改 HUD 的重新绑定分帧执行。旧版村内移动和训练场出招的测量见[性能对照](docs/performance.md)。
 
 保存或删除文件后，监听器只更新引用发生变化的资源。给正在使用的资源换绑时，游戏可在下一帧推进已就绪的步骤。装备预览等界面暂未打开时，游戏会在对应节点就绪后通知监听器。村内水车从文件落盘到确认绑定的中位时间由 2.07 秒缩短到 1.04 秒。[保存延迟和跑图复测](docs/save-performance.md)
 
-自动监听器按 `natives/stm` 下的资源路径识别装备。以 265 女猎人手甲为例，模型和材质放在 `player/mod/f/pl265/`，与 279 使用同一套热加载流程。用 B 套覆盖同编号的 A 套后，等监听器打印这批文件的 `Replaced`，切到另一件装备再切回，或重建玩家对象，就会加载 B 套。删除覆盖后等 `Removed`，同样操作会加载该编号的 PAK 原件。监听器会等写入者关闭文件，将同一次复制中的模型、材质和依赖一起撤出旧缓存，并为当前穿戴部件预先请求成对的模型和材质。现有对象可以继续持有旧资源直到游戏换装。[279 实穿读数](docs/reentry-18.md)
+监听器按 `natives/stm` 下的资源路径识别正在穿戴的装备。换场期间，插件记录待刷新的资源路径，等新猎人的实穿部件就绪后按最后落盘的文件装配。1.0.6 在原猎人上替换部件。旧版本的整套模型重建记录保留作对照。[骨架和穿戴物理实机记录](docs/worn-skeletons.md) · [实际任务换装与队友判定](docs/quest-equipment.md)
+
+1.0.5 支持在原猎人身上刷新单件装备的顶点位置。插件核对实际加载的文件与原版 MESH，仅在骨骼、权重、材质槽及索引一致、目标部件及其父子挂点没有 CHAIN、也没有该性别的松散影骨时，直接为已有渲染器换绑。改模型结构的整套外观继续使用游戏的装备装配流程。整套安装时平台文件可以并行准备；插件识别自己创建硬链接产生的文件变更，避免在目录通知溢出后重复刷新整套。[保留原猎人的实机记录](docs/worn-skeletons.md#在原猎人上换资源)
+
+1.0.4 在原版 Lua Bone System 姿态修复 v2 和 FirstNatives 下分别实测了训练场全部 14 类武器，每类均完成原版 → 梅 → 天狐 → 原版。整套刷新沿用原有装备和 PlayerData，训练场实测有两个猎人内部计时器会重新初始化。任务内已实测废神社探索、水没林毒狗龙王、冰封群岛雪鬼兽。联机队友的完整外观目前等待游戏重建该队友的显示模型，两名真人同场尚待验证。[逐项实测和限制](docs/quest-equipment.md)
+
+单独修改相容的 CHAIN 时，已有物理组件直接采用新组。单独修改 FirstNatives 的套装影骨时，插件检查当前穿戴的完整套装，把模型绑定到现有猎人，按关节核对实际基础姿态。对于已识别的 Lua Bone System 版本，本插件在 JSON 安装、修改或删除后更新对应的缓存，由原脚本在自己的动画阶段处理关节和 IK。ArmorVariantManager 的 JSON 仍由该前置自行管理。[早期 1.0.1 冷安装对照](docs/wilds-parity.md)
 
 监听器随包识别 154,118 条原版逻辑路径，并读取 339 份原版材质模板的参数与贴图接口。删除同路径覆盖时，游戏从 PAK 读取替代资源。需要比较 GUI、PFB、USER 的原版字段，或读取未收录的模板原件时，可额外指定 `--baseline-root "<原版 natives/stm>"`。平台渲染目标保留游戏文件的完整后缀，例如 `PreviewCamera_Equip.rtex.5.stm`。
 
@@ -60,7 +84,7 @@ GUI、PFB 和 USER 在下一次创建时都读取整份资源。原地更新已�
 
 验证环境为 Windows x64、Steam 16.0.2.0（Build 17920865）、REFramework v1.5.9.1+472-c4b13148。原生模块依赖此版游戏的内部布局与方法，并在运行时检查构建特征。
 
-1. 安装 REFramework，启用 LooseFileLoader。将项目中的 `reframework` 目录合并到游戏目录。此目录同时包含脚本和配套的 `data/MHRS-Files-HotReload/arm_material.dll`。已运行的游戏可在 ScriptRunner 中点 Reset scripts。
+1. 这一节复现早期的开发者手动测试。在单独的开发安装中构建原生模块，部署相应的脚本与开发 DLL，启用 REFramework 的 LooseFileLoader。
 2. 穿上使用目标 MDF 的手甲，在项目目录运行以下命令。监听器运行期间直接保存 `natives/stm/player/mod/f/pl279/f_arm279.mdf2.23`，按 Ctrl+C 结束监听。
 
 ```powershell

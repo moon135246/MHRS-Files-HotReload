@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <cstddef>
 #include <filesystem>
+#include <string>
 
 namespace {
 constexpr wchar_t channel[] = L"reframework/data/MHRS-Files-HotReload";
@@ -11,9 +12,11 @@ OVERLAPPED operation{};
 alignas(DWORD) unsigned char buffer[8192];
 ULONGLONG next_open = 0;
 
+#ifndef MHRS_EMBEDDED_WATCHER
 struct WatcherProcess {
     HANDLE job = nullptr;
     HANDLE process = nullptr;
+    std::wstring job_name;
 
     ~WatcherProcess() {
         if (job) CloseHandle(job);
@@ -27,10 +30,12 @@ struct WatcherProcess {
         const DWORD length = GetModuleFileNameW(nullptr, game_exe, ARRAYSIZE(game_exe));
         if (!length || length == ARRAYSIZE(game_exe)) return false;
         const auto game = std::filesystem::path(game_exe).parent_path();
-        const auto exe = game / channel / L"watcher" / L"MHRS-Watcher.exe";
+        const auto exe = game / channel / L"MHRS-Watcher.exe";
         if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
         if (!job) {
-            job = CreateJobObjectW(nullptr, nullptr);
+            job_name = L"Local\\MHRS-Files-HotReload-" + std::to_wstring(GetCurrentProcessId()) +
+                       L"-" + std::to_wstring(GetTickCount64());
+            job = CreateJobObjectW(nullptr, job_name.c_str());
             if (!job) return false;
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
             limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -43,20 +48,18 @@ struct WatcherProcess {
         STARTUPINFOW startup{};
         startup.cb = sizeof(startup);
         PROCESS_INFORMATION child{};
-        if (!CreateProcessW(exe.c_str(), nullptr, nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED,
+        // The Python worker joins the job. The onefile launcher must survive it
+        // long enough to remove its private extracted runtime on game exit.
+        auto command = L"\"" + exe.wstring() + L"\" --owner-job " + job_name;
+        if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
                             nullptr, game.c_str(), &startup, &child)) return false;
-        const bool started = AssignProcessToJobObject(job, child.hProcess) && ResumeThread(child.hThread) != DWORD(-1);
         CloseHandle(child.hThread);
-        if (!started) {
-            TerminateProcess(child.hProcess, 1);
-            CloseHandle(child.hProcess);
-            return false;
-        }
         process = child.hProcess;
         return true;
     }
 };
 WatcherProcess watcher;
+#endif
 
 void close_watch() {
     if (directory != INVALID_HANDLE_VALUE) {
@@ -137,7 +140,9 @@ extern "C" __declspec(dllexport) int mhrs_close_request_watch(void*) {
     return 0;
 }
 
+#ifndef MHRS_EMBEDDED_WATCHER
 extern "C" __declspec(dllexport) int mhrs_start_watcher(void*) {
     try { return watcher.start() ? 1 : 0; }
     catch (...) { return 0; }
 }
+#endif

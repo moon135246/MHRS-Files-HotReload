@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from file_changes import require_closed_writers, snapshots
+from platform_files import PlatformFiles
 from material_layout import IncompatibleMaterial, Material, MaterialValidator, check_layout
 from resource_links import ResourceLinks, consumers, logical_path
 from watch_arm279 import command, replace
@@ -18,6 +19,45 @@ from watch_outfit import GuiReadyNotice, SUFFIXES, files, signature
 
 
 class FileChangesTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "requires Windows filesystem metadata")
+    def test_unsupported_directory_notifications_use_bounded_metadata_scans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp)
+            root = game / "natives/stm"
+            root.mkdir(parents=True)
+            path = root / "part.chain.48"
+            path.write_bytes(b"abc")
+            scans = []
+
+            def counted(directory):
+                scans.append(directory)
+                return files(directory)
+
+            with patch("file_changes.DirectoryChanges", side_effect=OSError("unsupported")), \
+                    patch("file_changes.POLL_INTERVAL", .08):
+                stream = snapshots(root, counted, signature, SUFFIXES, anchor=game)
+                try:
+                    before = next(stream)
+                    for _ in range(3):
+                        self.assertIs(stream.send(0), before)
+                    self.assertEqual(len(scans), 1)
+                    stat = path.stat()
+                    # NTFS can timestamp both operations with the same clock
+                    # tick. Exercise a distinct post-startup physical write.
+                    time.sleep(.03)
+                    path.write_bytes(b"xyz")
+                    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                    self.assertEqual(signature(path), before[path][0])
+                    end = time.monotonic() + 2
+                    while stream.send(.03) is before:
+                        self.assertLess(time.monotonic(), end, "missed unchanged LastWriteTime")
+                    path.unlink()
+                    end = time.monotonic() + 2
+                    while path in stream.send(.03):
+                        self.assertLess(time.monotonic(), end, "missed removal during polling")
+                finally:
+                    stream.close()
+
     def test_contending_command_resumes_when_channel_is_released(self):
         import msvcrt
         with tempfile.TemporaryDirectory() as directory, ThreadPoolExecutor(1) as pool:
@@ -253,11 +293,74 @@ class FileChangesTest(unittest.TestCase):
             stream = snapshots(root, files, signature, SUFFIXES)
             try:
                 initial = next(stream)
+                self.assertIs(stream.send(.1), initial)
+                old = file.stat()
+                time.sleep(.03)
+                file.write_bytes(b"new")
+                os.utime(file, ns=(old.st_atime_ns, old.st_mtime_ns))
                 after = stream.send(.1)
                 self.assertEqual(after[file][0], initial[file][0])
                 self.assertNotEqual(after[file], initial[file])
+                self.assertIs(stream.send(.1), after)
             finally:
                 stream.close()
+
+    @unittest.skipUnless(os.name == "nt", "requires NTFS file identity and hard links")
+    def test_overflow_after_own_platform_publication_preserves_real_edits(self):
+        with tempfile.TemporaryDirectory() as directory, patch("file_changes.LooseChanges") as factory:
+            base = Path(directory)
+            root = base / "natives/stm"
+            root.mkdir(parents=True)
+            paths = [root / (name + ".tex.28") for name in ("unchanged", "edited", "replaced", "renamed", "deleted")]
+            unchanged, edited, replaced, renamed, deleted = paths
+            for file in paths:
+                file.write_bytes(b"mod")
+            manager = PlatformFiles(root, base / "state")
+            factory.return_value.poll.return_value = set(), set(), True
+            stream = snapshots(root, files, signature, SUFFIXES, known_link_change=manager.known_link_change)
+            try:
+                initial = next(stream)
+                time.sleep(.03)
+                manager.prepare(paths)
+                with manager.pin_copy(unchanged) as held:
+                    self.assertEqual(held.read(), b"mod")
+                self.assertIs(stream.send(.1), initial)
+                time.sleep(.03)
+                old = edited.stat()
+                Path(str(edited) + ".stm").write_bytes(b"new")
+                os.utime(edited, ns=(old.st_atime_ns, old.st_mtime_ns))
+                replacement = root / "fresh.tmp"
+                replacement.write_bytes(b"mod")
+                os.replace(replacement, replaced)
+                new_name = root / "moved.tex.28"
+                renamed.rename(new_name)
+                deleted.unlink()
+                after = stream.send(.1)
+                self.assertEqual(after[unchanged], initial[unchanged])
+                self.assertEqual(after[edited][0], initial[edited][0])
+                self.assertNotEqual(after[edited], initial[edited])
+                self.assertNotEqual(after[replaced][0], initial[replaced][0])
+                self.assertIn(new_name, after)
+                self.assertNotIn(renamed, after)
+                self.assertNotIn(deleted, after)
+                self.assertIs(stream.send(.1), after)
+            finally:
+                stream.close()
+                manager.close()
+
+    def test_overflow_without_change_time_conservatively_republishes(self):
+        with tempfile.TemporaryDirectory() as directory, patch("file_changes.LooseChanges") as factory:
+            with patch("file_changes.FileChangeTimes.read", return_value=None):
+                root = Path(directory)
+                file = root / "part.user.2"
+                file.write_bytes(b"mod")
+                factory.return_value.poll.return_value = set(), set(), True
+                stream = snapshots(root, files, signature, SUFFIXES)
+                try:
+                    initial = next(stream)
+                    self.assertNotEqual(initial[file], stream.send(.1)[file])
+                finally:
+                    stream.close()
 
     @unittest.skipUnless(os.name == "nt", "requires Windows directory notifications")
     def test_replace_stm_or_natives_while_watching(self):
@@ -288,7 +391,7 @@ class FileChangesTest(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "requires the Windows request watcher")
     def test_request_signal_filters_status_and_rearms_after_atomic_replace(self):
-        dll_path = Path(__file__).resolve().parents[1] / "reframework/data/MHRS-Files-HotReload/request_watch.dll"
+        dll_path = Path(__file__).resolve().parents[1] / "reframework/data/MHRS-Files-HotReload/mhrs_hotreload.dll"
         dll = ctypes.CDLL(str(dll_path))
         changed, close = dll.mhrs_request_changed, dll.mhrs_close_request_watch
         old_cwd = Path.cwd()
@@ -340,7 +443,11 @@ class FileChangesTest(unittest.TestCase):
                     self.assertLess(time.monotonic(), end)
                     time.sleep(.01)
                 path.unlink()
-                self.assertNotIn(path, next(stream))
+                # The overlapped directory notification may complete after
+                # unlink returns. next(stream) is a zero-time poll.
+                end = time.monotonic() + 2
+                while path in stream.send(.05):
+                    self.assertLess(time.monotonic(), end, "missed file removal")
             finally:
                 stream.close()
 

@@ -49,11 +49,23 @@ local function normalized(path)
     return (path or ""):lower():gsub("\\", "/"):gsub("^@", "")
 end
 
-local native_lib = {}
+-- The plugin supplies its own functions when running this chunk in REFramework.
+-- Source installs resolve the same functions from their development binaries.
+local embedded = ...
+if type(embedded) ~= "table" then embedded = nil end
+require("MHRS_HotReload.lua_bone_system").install(embedded and embedded.process_id)
+require("MHRS_HotReload.village_equipment").install(embedded and embedded.process_id)
+local native_lib = embedded or {}
+local dll_dir = "reframework/data/MHRS-Files-HotReload/"
+local runtime_dll = dll_dir .. "mhrs_hotreload.dll"
+local combined_watch = embedded and embedded.request_changed or package.loadlib(runtime_dll, "mhrs_request_changed")
+-- Older source installations can still load the original two modules.
+local material_dll = combined_watch and runtime_dll or dll_dir .. "arm_material.dll"
+local watch_dll = combined_watch and runtime_dll or dll_dir .. "request_watch.dll"
 local native_job
 local function native(action)
     if not native_lib[action] then
-        native_lib[action] = assert(package.loadlib("reframework/data/MHRS-Files-HotReload/arm_material.dll", "mhrs_" .. action))
+        native_lib[action] = assert(package.loadlib(material_dll, "mhrs_" .. action))
     end
     native_lib[action]()
     local f = assert(io.open(data .. "native-state.txt", "r"))
@@ -180,9 +192,8 @@ local function run(action,req)
     return {before = before, requested = path, resource = tostring(res:get_address())}
 end
 
-local watch_dll="reframework/data/MHRS-Files-HotReload/request_watch.dll"
-local request_changed=package.loadlib(watch_dll,"mhrs_request_changed")
-local close_request_watch=package.loadlib(watch_dll,"mhrs_close_request_watch")
+local request_changed=combined_watch or package.loadlib(watch_dll,"mhrs_request_changed")
+local close_request_watch=embedded and embedded.close_request_watch or package.loadlib(watch_dll,"mhrs_close_request_watch")
 if request_changed then request_changed(true) end
 re.on_script_reset(function()
     if close_request_watch then close_request_watch() end
@@ -194,7 +205,7 @@ end)
 local initial = json.load_file(data .. "request.json")
 last_id = initial and initial.id
 json.dump_file(data .. "status.json", {state = "loaded"})
-local start_watcher = package.loadlib(watch_dll, "mhrs_start_watcher")
+local start_watcher = embedded and embedded.start_watcher or package.loadlib(watch_dll, "mhrs_start_watcher")
 if not (start_watcher and start_watcher(true)) then
     log.warn("[MHRS-Files-HotReload] Packaged watcher unavailable. Check the installation or run tools/watch_outfit.py from source.")
 end

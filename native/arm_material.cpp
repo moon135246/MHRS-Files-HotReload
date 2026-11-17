@@ -36,7 +36,7 @@ constexpr Kind kinds[] = {
 };
 constexpr char result_path[] = "reframework/data/MHRS-Files-HotReload/native-state.txt";
 const Ptr base = reinterpret_cast<Ptr>(GetModuleHandleW(nullptr));
-struct Transaction { Ptr manager{}, old{}, fresh{}, key{}, parking{}; const Kind* kind{}; } tx, masters[2];
+struct Transaction { Ptr manager{}, old{}, fresh{}, key{}, parking{}; const Kind* kind{}; bool require_platform{}; } tx, masters[2];
 size_t master_count{};
 std::vector<Transaction> staged_mdfs;
 std::set<Ptr> platform_keys;
@@ -127,7 +127,7 @@ const char* begin(const wchar_t* path, const Kind& kind, bool platform=false) {
         const std::wstring request_path=(platform || platform_keys.count(key)) ? std::wstring(L"@")+path : path;
         const Ptr fresh=function<Ptr(*)(Ptr,Ptr,const wchar_t*)>(0x416ef40)(rm,type,request_path.c_str());
         if (!fresh) return "native resource creation failed";
-        tx={rm,0,fresh,key,0,&kind};
+        tx={rm,0,fresh,key,0,&kind,platform};
         return "pending";
     }
     const Ptr old=field<Ptr>(node,0x28);
@@ -151,7 +151,7 @@ const char* begin(const wchar_t* path, const Kind& kind, bool platform=false) {
         release(old);
         return "native resource creation failed";
     }
-    tx = {rm,old,fresh,key,parking,&kind};
+    tx = {rm,old,fresh,key,parking,&kind,platform};
     return "pending";
 }
 // A file can disappear while meshes, prefab instances or motion layers still own
@@ -373,6 +373,90 @@ bool deps_ready_detail(Ptr r, const wchar_t** waiting) {
     return finish_resource(r);
 }
 bool deps_ready(Ptr r) { return deps_ready_detail(r,nullptr); }
+
+// A resource may already have been requested normally by a prefab or loader.
+// Verify that the first request for every companion actually won the ordinary
+// key, and wait for standalone textures before the watcher removes its copy.
+const char* equipment_platform_ready(Ptr rm, FILE* waiting) {
+    FILE* input{};
+    if (fopen_s(&input,"reframework/data/MHRS-Files-HotReload/equipment-platform.txt","rb"))
+        return "missing equipment platform list";
+    const char* result="ready";
+    char line[8192];
+    while (fgets(line,sizeof(line),input)) {
+        char* tab=strchr(line,'\t');
+        unsigned long long address{};
+        char ending{};
+        if (!tab || sscanf_s(tab+1,"%llu%c",&address,&ending,1u)!=2 || ending!='\n') {
+            result="invalid equipment platform list"; break;
+        }
+        *tab='\0';
+        wchar_t path[2048]{};
+        if (!MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,line,-1,path,2048)) {
+            result="invalid equipment platform path"; break;
+        }
+        const auto ext=wcsrchr(path,L'.');
+        const bool texture=ext && !_wcsicmp(ext,L".tex");
+        if (!ext || (!texture && _wcsicmp(ext,L".mesh") && _wcsicmp(ext,L".mdf2") && _wcsicmp(ext,L".chain") && _wcsicmp(ext,L".mot"))) {
+            result="invalid equipment platform resource"; break;
+        }
+        const Ptr key=function<Ptr(*)(const wchar_t*)>(0x4171030)(path);
+        Ptr resource{};
+        {
+            Lock lock(rm);
+            const Ptr node=lookup(rm+0xc48,key);
+            resource=node ? field<Ptr>(node,0x28) : 0;
+            if (!resource || resource!=address || field<Ptr>(resource,0x30)!=key
+                    || !field<const wchar_t*>(resource,8) || _wcsicmp(path,field<const wchar_t*>(resource,8))
+                    || !field<uint8_t>(resource,0x3a)) {
+                if (waiting) fprintf(waiting,"%s expected platform request @%s, loaded %s\n",line,line,
+                    resource && resource==address ? "ordinary source" : "different cache resource");
+                result="equipment platform source mismatch"; break;
+            }
+            retain(resource);
+        }
+        if (texture && !finish_resource(resource)) {
+            result="pending";
+            if (waiting) fprintf(waiting,"%s\t%04x\n",line,unsigned(field<uint16_t>(resource,0x38)));
+        }
+        release(resource);
+    }
+    if (ferror(input)) result="cannot read equipment platform list";
+    fclose(input);
+    return result;
+}
+
+// Rise v23 MDF stores the UTF-16 material name in the same raw buffer as the
+// 80-byte slot header. The loader can fix a file offset into an absolute
+// pointer. Bound either representation before reading the string.
+bool write_material_slots(FILE* out, Ptr resource, const char* path) {
+    const Ptr raw=field<Ptr>(resource,0x50), slots=field<Ptr>(resource,0x58);
+    if (!raw || !slots || field<uint32_t>(raw,0)!=0x46444d) return false;
+    const unsigned count=field<uint16_t>(raw,6);
+    if (!count || count>256) return false;
+    const size_t header_end=16+count*80;
+    for (unsigned i=0;i<count;++i) {
+        const Ptr header=raw+16+i*80;
+        if (field<Ptr>(slots+i*0x110,0x30)!=header) return false;
+        const Ptr value=field<Ptr>(header,0);
+        const Ptr offset=value>=raw ? value-raw : value;
+        if (offset<header_end || offset>=16*1024*1024 || (offset&1)) return false;
+        const Ptr location=raw+offset;
+        MEMORY_BASIC_INFORMATION region{};
+        if (!VirtualQuery(reinterpret_cast<void*>(location),&region,sizeof(region))
+                || region.State!=MEM_COMMIT || (region.Protect&(PAGE_NOACCESS|PAGE_GUARD))) return false;
+        const auto* name=reinterpret_cast<const wchar_t*>(location);
+        const auto remaining=(reinterpret_cast<Ptr>(region.BaseAddress)+region.RegionSize-location)/sizeof(wchar_t);
+        const size_t limit=remaining<1024 ? remaining : 1024;
+        const size_t length=wcsnlen_s(name,limit);
+        if (!length || length==limit || wcspbrk(name,L"\t\r\n")) return false;
+        char utf8[4096]{};
+        const int size=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,name,static_cast<int>(length),
+                                           utf8,sizeof(utf8)-1,nullptr,nullptr);
+        if (size<=0 || fprintf(out,"%s\t%llu\t%s\n",path,static_cast<unsigned long long>(resource),utf8)<0) return false;
+    }
+    return true;
+}
 bool owns_cache_entries(const Transaction& t) {
     const Ptr map=t.manager+0xc48, live=lookup(map,t.key);
     if (!live || field<Ptr>(live,0x28)!=t.fresh) return false;
@@ -450,8 +534,8 @@ extern "C" __declspec(dllexport) int mhrs_material_links(void*) {
     catch (const std::bad_alloc&) { write_state("unable to collect material links"); }
     return 0;
 }
-// The Lua side holds ordinary resource references for both halves of each
-// visible model. Check the exact canonical keys before a rebuild can use them.
+// Lua holds both halves of each model. Check their ordinary lookup keys and
+// completed dependencies before changing a renderer.
 extern "C" __declspec(dllexport) int mhrs_equipment_ready(void*) {
     if (!supported()) { write_state("unsupported Rise build"); return 0; }
     const Ptr rm=field<Ptr>(base,0x416d9da+0xb4b3c56);
@@ -462,6 +546,16 @@ extern "C" __declspec(dllexport) int mhrs_equipment_ready(void*) {
     const char* result="ready";
     FILE* pending{};
     fopen_s(&pending,"reframework/data/MHRS-Files-HotReload/equipment-wait.txt","wb");
+    result=equipment_platform_ready(rm,pending);
+    if (strcmp(result,"ready") && strcmp(result,"pending")) {
+        if (pending) fclose(pending);
+        fclose(f); write_state(result); return 0;
+    }
+    FILE* slot_names{};
+    if (fopen_s(&slot_names,"reframework/data/MHRS-Files-HotReload/equipment-slots.txt","wb")) {
+        if (pending) fclose(pending);
+        fclose(f); write_state("cannot write equipment slots"); return 0;
+    }
     char line[8192];
     while (fgets(line,sizeof(line),f)) {
         wchar_t path[2048]{};
@@ -471,7 +565,9 @@ extern "C" __declspec(dllexport) int mhrs_equipment_ready(void*) {
         }
         const wchar_t* ext=wcsrchr(path,L'.');
         const bool material=ext && !_wcsicmp(ext,L".mdf2");
-        if (!material && (!ext || _wcsicmp(ext,L".mesh"))) { result="invalid equipment resource"; break; }
+        if (!ext || (!material && _wcsicmp(ext,L".mesh") && _wcsicmp(ext,L".chain") && _wcsicmp(ext,L".mot"))) {
+            result="invalid equipment resource"; break;
+        }
         const Ptr key=function<Ptr(*)(const wchar_t*)>(0x4171030)(path);
         Ptr resource{};
         {
@@ -485,13 +581,25 @@ extern "C" __declspec(dllexport) int mhrs_equipment_ready(void*) {
         const wchar_t* dependency=nullptr;
         if (!(material ? deps_ready_detail(resource,&dependency) : finish_resource(resource))) {
             result="pending";
-            if (pending) fprintf(pending,"%ls\t%04x\t%ls\n",path,unsigned(field<uint16_t>(resource,0x38)),
-                                 dependency ? dependency : L"");
+            if (pending) {
+                char child[8192]{};
+                if (dependency && !WideCharToMultiByte(CP_UTF8,0,dependency,-1,child,sizeof(child),nullptr,nullptr))
+                    child[0]='\0';
+                fprintf(pending,"%.*s\t%04x\t%s\n",static_cast<int>(n),line,unsigned(field<uint16_t>(resource,0x38)),child);
+            }
+        } else if (material) {
+            line[n]='\0';
+            if (!write_material_slots(slot_names,resource,line)) {
+                result="invalid equipment material slots";
+                release(resource);
+                break;
+            }
         }
         release(resource);
     }
     if (ferror(f)) result="cannot read equipment paths";
     fclose(f);
+    if (fclose(slot_names)) result="cannot write equipment slots";
     if (pending) fclose(pending);
     write_state(result);
     return 0;
@@ -570,6 +678,9 @@ extern "C" __declspec(dllexport) int mhrs_resume_master(void*) {
     return 0;
 }
 extern "C" __declspec(dllexport) int mhrs_poll(void*) {
+    if (tx.fresh && tx.require_platform && !field<uint8_t>(tx.fresh,0x3a)) {
+        write_state("expected platform resource, received ordinary source",tx.fresh); return 0;
+    }
     const bool ready=tx.fresh && (tx.kind==&kinds[0] ? deps_ready(tx.fresh) : finish_resource(tx.fresh));
     write_state(!tx.fresh ? "no active transaction" : ready ? "ready" : "pending",tx.fresh);
     return 0;
