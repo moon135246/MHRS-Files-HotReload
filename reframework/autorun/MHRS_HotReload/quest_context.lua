@@ -15,9 +15,13 @@ function M.read()
             qm:call("isPhaseResult") or qm:call("isQuestStartEventDemo") or qm:call("isQuestInterruptEventDemo"))}
 end
 
-function M.same(before,now)
+function M.same_instance(before,now)
     return now and before.data and before.manager==now.manager and before.data==now.data and
-        before.no==now.no and before.map==now.map and before.status==now.status and
+        before.no==now.no and before.map==now.map
+end
+
+function M.same(before,now)
+    return M.same_instance(before,now) and before.status==now.status and
         type(before.elapsed)=="number" and type(now.elapsed)=="number" and now.elapsed>=before.elapsed-0.5
 end
 

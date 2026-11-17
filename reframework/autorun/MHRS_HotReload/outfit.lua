@@ -1257,6 +1257,19 @@ function M.run(action,req,native)
             end
             training_rebuild=(state.training or state.quest) and next(state.observed)~=nil
             if state.complete_outfit and not req.reset_replay then full_owner=state end
+            -- A copy may finish between hunters. Keep only the changed resource
+            -- names until a new local actor exposes its registered armor slots.
+            if not state.ready and not state.complete_outfit and not req.worn_retry and not req.reset_replay then
+                local meshes,parts={},{}
+                for path in pairs(live) do
+                    local part=path:match("^player/mod/[fm]/pl%d+/[fm]_(%a+)%d+%.mesh$")
+                    if part then meshes[path],parts[part]=true,true end
+                end
+                if parts.body and parts.arm and parts.wst and parts.leg and parts.helm then
+                    full_wait={worn=meshes,discover=true,retry=true,reason="Waiting for current scene armor consumers"}
+                    pause_hunter=true
+                end
+            end
             if req.worn_retry then
                 retry_owners=owners
                 assert(state.ready,"[village changed] Hunter is not ready for the queued change")
@@ -1270,7 +1283,7 @@ function M.run(action,req,native)
                     waiting[key]=old
                 end
             end
-            pause_hunter=waiting and not state.ready
+            pause_hunter=pause_hunter or (waiting and not state.ready)
             if waiting and state.complete_outfit and not req.reset_replay then
                 full_wait={root=state.root,scope=state.scope,worn=state.observed,retry=true,reason="Local worn outfit is not ready"}
                 pause_hunter=true

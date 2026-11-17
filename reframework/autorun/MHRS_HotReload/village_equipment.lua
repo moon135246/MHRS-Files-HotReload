@@ -89,13 +89,15 @@ local function ready(pm,p,go,training,quest,rebuilding)
     if saved_mount or cancelled_mount or cancelled or saved_recovery or not go or not go:call("get_Valid") or not go:call("get_Draw") then return end
     local place=quest
     if quest then
-        if not quest.playable or p:call("isDie") or (rebuilding and not quest_context.available(quest,p)) then return end
+        -- Quest event flags can stay set throughout an ordinary hunt. They
+        -- describe gameplay, while this path mounts parts on a living owner.
+        if not quest.data or (rebuilding and (p:call("isDie") or not quest_context.available(quest,p))) then return end
     else
         place=sdk.get_managed_singleton("snow.VillageAreaManager")
         if not place or not place:call("isIdle") then return end
     end
     local index=pm:call("getMasterPlayerID")
-    if not pm:call("isReadyPlayer",index) or not pm:call("isReadyPlayerLoadState") or
+    if not pm:call("isReadyPlayer",index) or (rebuilding and not pm:call("isReadyPlayerLoadState")) or
             not p:call("isActivePlayer") then return end
     if rebuilding and not sdk.get_managed_singleton("snow.data.EquipDataManager") then return end
     if training or quest then
@@ -145,7 +147,7 @@ function M.worn_state(wanted,wait_factory,wait_rebuild)
                 observed[key]=tostring(holder:read_qword(0x10))
                 owners[key]=mesh:get_address()
                 if part:call("get_Update") and mesh:call("get_MeshReady") then available[key]=true end
-            elseif mesh and not holder then complete=false end
+            elseif not key then complete=false end
         end
     end
     if complete and wait_factory and covered==5 then
@@ -203,6 +205,8 @@ local function defer_mount(tx,reason,wait_rebuild)
     end
     local state={observed={}}
     if not reason:find("[normal equip]",1,true) then state=M.worn_state(wanted) end
+    local rediscover=tx.full_outfit and not tx.started and not tx.reset_replay and not wait_rebuild and
+        not reason:find("[normal equip]",1,true) and (state.root~=tx.old_address or state.scope~=tx.scope)
     local retry=state.root==tx.old_address
         and state.scope==tx.scope and (state.complete_outfit or wait_rebuild)
     if retry then
@@ -211,9 +215,10 @@ local function defer_mount(tx,reason,wait_rebuild)
             if row.mesh and (not state.observed[row.mesh] or (row.before and state.observed[row.mesh]~=tostring(row.before))) then retry=false;break end
         end
     end
-    tx.deferred_mount={retry=retry==true,reason=reason,root=tx.old_address,scope=tx.scope,worn=state.observed,
+    tx.deferred_mount={retry=rediscover or retry==true,reason=reason,root=tx.old_address,scope=tx.scope,
+        discover=rediscover or nil,worn=rediscover and wanted or state.observed,
         wait_factory=reason:find("cold armor factory",1,true)~=nil,wait_rebuild=wait_rebuild}
-    if log then log.info("[MHRS-Files-HotReload] "..(retry and "Waiting for in-place equipment: " or "Equipment deferred to natural equip: ")..reason) end
+    if log then log.info("[MHRS-Files-HotReload] "..(tx.deferred_mount.retry and "Waiting for in-place equipment: " or "Equipment deferred to natural equip: ")..reason) end
     return false
 end
 
@@ -347,7 +352,7 @@ function M.advance(tx,resources,scene_components)
     if not tx.started then
         local place,index,gear=ready(pm,p,go,training,quest)
         if not place or go~=tx.old or index~=tx.index or
-                (tx.quest and not quest_context.same(tx.quest,quest)) or
+                (tx.quest and not quest_context.same_instance(tx.quest,quest)) or
                 (not tx.quest and (quest or place:call("getCurrentAreaNo")~=tx.area)) then
             if tx.full_outfit and not tx.reset_replay then return defer_mount(tx,"Local hunter is no longer ready in "..location(tx)) end
             error("[village changed] Local hunter is no longer ready in "..location(tx))
