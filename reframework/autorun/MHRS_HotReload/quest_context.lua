@@ -2,17 +2,20 @@
 -- Identify a live mission from its own manager and stage.
 local M={}
 
-function M.read()
+function M.read(include_gameplay)
     local qm=sdk.get_managed_singleton("snow.QuestManager")
     if not qm then return {} end
     local no,map=qm:call("getQuestNo"),qm:call("getMapNo")
     local active=qm:call("getActiveQuestData")
     if not active or type(no)~="number" or no<=0 or type(map)~="number" then return {} end
+    local result={manager=tostring(qm:get_address()),data=tostring(active:get_address()),no=no,map=map}
+    if include_gameplay==false then return result end
     local status=qm:call("getStatus")
-    return {manager=tostring(qm:get_address()),data=tostring(active:get_address()),no=no,map=map,
-        status=status,elapsed=qm:call("getQuestElapsedTimeSec"),
-        playable=status==2 and not (qm:call("isQuestReset") or qm:call("isQuestTimeOver") or qm:call("isWaitQuestEnd") or
-            qm:call("isPhaseResult") or qm:call("isQuestStartEventDemo") or qm:call("isQuestInterruptEventDemo"))}
+    result.status=status
+    result.elapsed=qm:call("getQuestElapsedTimeSec")
+    result.playable=status==2 and not (qm:call("isQuestReset") or qm:call("isQuestTimeOver") or qm:call("isWaitQuestEnd") or
+        qm:call("isPhaseResult") or qm:call("isQuestStartEventDemo") or qm:call("isQuestInterruptEventDemo"))
+    return result
 end
 
 function M.same_instance(before,now)

@@ -249,6 +249,8 @@ def snapshots(root, files, signature, suffixes, anchor=None, known_link_change=N
     def scan(directory):
         entries = {}
         for file in files(directory):
+            if not file.name.lower().endswith(suffixes):
+                continue
             try:
                 entries[file] = (signature(file), sequence)
             except FileNotFoundError:

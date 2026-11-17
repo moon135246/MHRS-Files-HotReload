@@ -82,7 +82,7 @@ local function shared_cold(factory,reserved,uncertain)
         and not (factory:call("get_Ready") and factory:call("get_Valid"))
 end
 -- Poll a blocked shared factory without warming it or retiring resources.
-function M.factories_available(pm,p,root)
+function M.factories_available(pm,p,root,wanted)
     local i=pm:call("getMasterPlayerID")
     local req=pm:call("get_PlayerParam"):get_element(i)
     local j={pm=pm,player=p,root=root,index=i,ctrl=p:get_field("_RefPlayerMaterialCtrl"),scope=roster.context(),request=req,rows={}}
@@ -90,9 +90,15 @@ function M.factories_available(pm,p,root)
     local get=indices:get_type_definition():get_method("Get(System.Int32)")
     local sex,weapon=pm:call("getPlayerSexType",req),pm:call("getPlayerWeaponType",req)
     for _,slot in ipairs(slots) do
-        local f,pack=selected_factory(pm,slot,indices,get,sex,weapon)
-        if not f then return false end
-        j.rows[#j.rows+1]={factory=f,pack=pack}
+        local go=p:call("getPartsGameObject",slot)
+        local _,h
+        if go then _,h=roster.render_part(go) end
+        local path=h and norm(h:call("get_ResourcePath"))
+        if not wanted or (path and wanted[path]) then
+            local f,pack=selected_factory(pm,slot,indices,get,sex,weapon)
+            if not f then return false end
+            j.rows[#j.rows+1]={factory=f,pack=pack}
+        end
     end
     local valid,reserved,uncertain=party.check(j)
     if not valid then return false end

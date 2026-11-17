@@ -1093,7 +1093,7 @@ function M.run(action,req,native)
     end
     if action=="asset_awake" then return awakened(req.done or {}) end
     if action=="asset_worn_state" then
-        return (require("MHRS_HotReload.village_equipment").worn_state(req.paths,req.wait_factory,req.wait_rebuild))
+        return (require("MHRS_HotReload.village_equipment").worn_state(req.paths,req.wait_factory))
     end
     if action=="asset_part_recovery" then return require("MHRS_HotReload.village_equipment").replay_state() end
     if action=="asset_equipment_abort" then
@@ -1248,25 +1248,25 @@ function M.run(action,req,native)
                 armor_mesh_requested=true
             end
         end
-        local waiting,pause_hunter,retry_owners,training_rebuild,full_wait,full_owner
+        local waiting,pause_hunter,retry_owners,full_wait,full_owner
         if armor_mesh_requested then
             local state,owners=require("MHRS_HotReload.village_equipment").worn_state(live)
             if req.worn_guard then
                 assert(req.worn_retry and state.root==req.worn_guard.root and state.scope==req.worn_guard.scope,
                     "[village changed] Queued outfit owner changed")
             end
-            training_rebuild=(state.training or state.quest) and next(state.observed)~=nil
             if state.complete_outfit and not req.reset_replay then full_owner=state end
             -- A copy may finish between hunters. Keep only the changed resource
             -- names until a new local actor exposes its registered armor slots.
-            if not state.ready and not state.complete_outfit and not req.worn_retry and not req.reset_replay then
-                local meshes,parts={},{}
+            if (not state.ready or state.slots_known==false) and not state.complete_outfit and not req.worn_retry and not req.reset_replay then
+                local meshes={}
                 for path in pairs(live) do
-                    local part=path:match("^player/mod/[fm]/pl%d+/[fm]_(%a+)%d+%.mesh$")
-                    if part then meshes[path],parts[part]=true,true end
+                    if path:match("^player/mod/[fm]/pl%d+/[fm]_%a+%d+%.mesh$") then meshes[path]=true end
                 end
-                if parts.body and parts.arm and parts.wst and parts.leg and parts.helm then
-                    full_wait={worn=meshes,discover=true,retry=true,reason="Waiting for current scene armor consumers"}
+                local unseen=false
+                for name in pairs(meshes) do if not state.observed[name] then unseen=true;break end end
+                if next(meshes) and (not state.ready or unseen) then
+                    full_wait={worn=meshes,discover=true,partial=true,retry=true,reason="Waiting for current scene armor consumers"}
                     pause_hunter=true
                 end
             end
@@ -1347,7 +1347,7 @@ function M.run(action,req,native)
                         end
                         -- A partially constructed outfit can temporarily have an
                         -- inactive component. Its prefab owns the whole new set.
-                        if live[owner.path:lower()] and not ((compound or armor_mesh_requested) and (ext=="mesh" or ext=="mdf2" or ext=="chain" or ext=="jcns"))
+                        if live[owner.path:lower()] and not (hunter_asset(owner.path:lower(),ext) and (compound or armor_mesh_requested))
                                 and go and not go:call("get_Update") then
                             local key=owner.path:lower()
                             owner.address=tostring(owner.old:read_qword(0x10))
@@ -1433,7 +1433,7 @@ function M.run(action,req,native)
         for _ in pairs(armor_candidates) do armor_count=armor_count+1 end
         local chain_components={}
         local peer_effects,chain_actors
-        local rebuild,positions_only=false,false
+        local assemble_parts,positions_only=false,false
         if not req.reset_replay and not req.worn_guard and (next(armor_candidates) or next(req.shadow_skeletons or {}) or next(physics_spec.chains or {})) then
             chain_components=scene_components("via.motion.Chain",components_by_type)
             peer_effects,chain_components,chain_actors=peer_physics.capture(chain_components,req,live,equipment,function(path,ext)
@@ -1470,15 +1470,15 @@ function M.run(action,req,native)
                 end
             end
             local reason
-            rebuild,positions_only,reason=worn_armor.requires_model_rebuild(armor_candidates,live,chain_components,hunter,physics_spec.chains or {})
-            rebuild=rebuild or full_owner~=nil or req.reset_replay~=nil or (training_rebuild and not positions_only)
+            assemble_parts,positions_only,reason=worn_armor.requires_part_assembly(armor_candidates,live,chain_components,hunter,physics_spec.chains or {})
+            assemble_parts=assemble_parts or full_owner~=nil or req.reset_replay~=nil
             if only and not next(live,only) and only:match("^player/mod/.+%.mesh$") then
-                log.info(("[MHRS-Files-HotReload] Worn mesh route %s candidates=%d slot=%s incoming=%s old=%s queued_old=%s worn_pak=%s wait=%s rebuild=%s (%s)")
+                log.info(("[MHRS-Files-HotReload] Worn mesh route %s candidates=%d slot=%s incoming=%s old=%s queued_old=%s worn_pak=%s wait=%s assemble_parts=%s (%s)")
                     :format(only,armor_count,tostring(slot_no),tostring((req.peer_meshes or {})[only]==true),
                     tostring(prior==true),tostring(retained==true),tostring(stock==true),tostring(pause_hunter==true),
-                    tostring(rebuild==true),tostring(reason)))
+                    tostring(assemble_parts==true),tostring(reason)))
             end
-            if positions_only and not rebuild then
+            if positions_only and not assemble_parts then
                 for id,row in pairs(armor_candidates) do
                     row.mdf2.keep=true
                     if pause_hunter and not retained then
@@ -1490,7 +1490,7 @@ function M.run(action,req,native)
                 end
             end
         end
-        if not pause_hunter and not rebuild and not positions_only
+        if not pause_hunter and not assemble_parts and not positions_only
                 and (shadow or next(armor_candidates) or next(physics_spec.chains or {})) then
             local protected=armor_candidates
             if shadow then
@@ -1509,7 +1509,7 @@ function M.run(action,req,native)
                 shadow=nil
             end
         end
-        local deferred_paths=(pause_hunter or rebuild or full_owner) and {} or nil
+        local deferred_paths=(pause_hunter or assemble_parts or full_owner) and {} or nil
         for id,row in pairs(armor_candidates) do
             if not row.mesh.keep and worn_armor.needs_reentry(row,armor_instances[id],armor_origins,startup)
                     and not row.vertex_owner and not (chains and chains:covers(row)) then
@@ -1526,7 +1526,7 @@ function M.run(action,req,native)
                     reason="Waiting to capture the five worn parts"}
             end
             if village and full_owner then village.full_outfit=true end
-            assert(not req.worn_retry or village or full_wait,"[village changed] Local equipment rebuild is not ready")
+            assert(not req.worn_retry or village or full_wait,"[village changed] Local equipment assembly is not ready")
             if req.reset_replay then
                 assert(shadow_layout,"Reset recovery cannot verify the current shadow source")
                 village.reset_replay=req.reset_replay
@@ -1577,7 +1577,7 @@ function M.run(action,req,native)
                 batch.physics=physics
             end
             batch.candidates=armor_candidates
-            if positions_only and not rebuild then
+            if positions_only and not assemble_parts then
                 batch.vertex_fallback=function()
                     return require("MHRS_HotReload.village_equipment").capture(armor_candidates,physics_spec,
                         req.expected_materials or {},nil,req.missing or {})

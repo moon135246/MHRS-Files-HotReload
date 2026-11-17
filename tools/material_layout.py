@@ -195,12 +195,19 @@ class MaterialValidator:
                                      for p, (sizes, params, textures) in json.load(src).items()}
 
     def source(self, file):
-        if file.is_file():
-            return file
+        candidates = [file]
+        if file.name.lower().endswith(".mmtr.220427553"):
+            candidates.append(Path(str(file) + ".stm"))
+        elif file.name.lower().endswith(".mmtr.220427553.stm"):
+            candidates.append(file.with_suffix(""))
+        for path in candidates:
+            if path.is_file():
+                return path
         if self.baseline is not None:
-            packaged = self.baseline / file.relative_to(self.root)
-            if packaged.is_file():
-                return packaged
+            for path in candidates:
+                packaged = self.baseline / path.relative_to(self.root)
+                if packaged.is_file():
+                    return packaged
         return None
 
     def layout(self, shader):

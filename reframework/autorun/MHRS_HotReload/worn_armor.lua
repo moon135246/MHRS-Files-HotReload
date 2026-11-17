@@ -14,7 +14,7 @@ end
 
 -- A normal equipment load may have restored a certified PAK mesh without
 -- inspecting vertex buffers. Record only the platform resource actually
--- attached to this rebuilt master's slot after the five-part verification.
+-- attached to this master's slot after the five-part verification.
 function M.remember_stock(batch,actors,resources,instance)
     local tx=batch.village
     if not tx or not tx.stable or tx.stable<2 or not batch.stock_scope or actors.scope~=batch.stock_scope then return 0 end
@@ -81,7 +81,7 @@ end
 
 -- Even a mesh on a part with no Chain of its own can share the hunter's
 -- joint map with a sibling's running simulation (the stock Mei body does).
-function M.requires_model_rebuild(candidates, changed, components, hunter, incoming_chains)
+function M.requires_part_assembly(candidates, changed, components, hunter, incoming_chains)
     local mesh_changed,foreign,positions_only=false,false,true
     for _,row in pairs(candidates) do
         row.mesh.keep=not changed[row.mesh.path:lower()]
@@ -117,7 +117,7 @@ local function physics_changed(batch, candidates)
     local pm=sdk.get_managed_singleton("snow.player.PlayerManager")
     local player=pm and pm:call("findMasterPlayer")
     local hunter=player and player:call("get_GameObject")
-    return M.requires_model_rebuild(candidates,batch.mesh_changes,batch.scene_components("via.motion.Chain"),hunter,{})
+    return M.requires_part_assembly(candidates,batch.mesh_changes,batch.scene_components("via.motion.Chain"),hunter,{})
 end
 
 function M.capture(comp, go, kinds, missing, resources, expected)
