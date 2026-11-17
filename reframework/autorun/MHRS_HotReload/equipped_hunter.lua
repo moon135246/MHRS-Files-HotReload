@@ -51,11 +51,17 @@ function M.equip_indices(pm)
     return table.concat(values,",")
 end
 
-function M.read(pm,p,go)
+function M.equipment(pm,p)
     local s,data=M.identity(p)
     if not s then return end
     s.indices=M.equip_indices(pm)
     if not s.indices then return end
+    return s,data
+end
+
+function M.read(pm,p,go)
+    local s,data=M.equipment(pm,p)
+    if not s then return end
     local td=data:get_type_definition()
     for _,name in ipairs(vital_fields) do
         local field=td:get_field(name)
@@ -75,9 +81,14 @@ function M.same_hunter(a,b)
         a.main==b.main and a.sub==b.sub
 end
 
-function M.difference(a,b)
+function M.equipment_difference(a,b)
     if not M.same_hunter(a,b) then return "Local hunter data or weapon changed" end
     if a.indices~=b.indices then return "Local equipped item indices changed" end
+end
+
+function M.difference(a,b)
+    local changed=M.equipment_difference(a,b)
+    if changed then return changed end
     for _,name in ipairs(vital_fields) do
         if math.abs(a[name]-b[name])>0.01 then return "Local hunter state changed: "..name end
     end
@@ -88,7 +99,7 @@ function M.difference(a,b)
     if dx*dx+dz*dz>0.0025 or math.abs(dot)<0.9999 then return "Local hunter moved or turned" end
 end
 
-function M.ready(pm,p,go,index,scope)
+function M.rebuild_ready(pm,p,go,index,scope)
     local gui=sdk.get_managed_singleton("snow.gui.GuiManager")
     if not p:call("isMasterPlayer") or p:call("getPlayerIndex")~=index or p:call("isWeaponOn") or
             not gui or gui:call("IsPlayerAllInputDisable") then

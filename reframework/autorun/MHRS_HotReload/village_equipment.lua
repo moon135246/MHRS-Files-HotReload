@@ -85,25 +85,36 @@ local function scene(rebuild)
     end
 end
 
-local function ready(pm,p,go,training,quest)
+local function ready(pm,p,go,training,quest,rebuilding)
     if saved_mount or cancelled_mount or cancelled or saved_recovery or not go or not go:call("get_Valid") or not go:call("get_Draw") then return end
     local place=quest
     if quest then
-        if not quest_context.available(quest,p) then return end
+        if not quest.playable or p:call("isDie") or (rebuilding and not quest_context.available(quest,p)) then return end
     else
         place=sdk.get_managed_singleton("snow.VillageAreaManager")
         if not place or not place:call("isIdle") then return end
     end
-    local eq=sdk.get_managed_singleton("snow.data.EquipDataManager")
-    if not eq then return end
     local index=pm:call("getMasterPlayerID")
     if not pm:call("isReadyPlayer",index) or not pm:call("isReadyPlayerLoadState") or
-            not p:call("isActivePlayer") or not p:call("isInput") then return end
+            not p:call("isActivePlayer") then return end
+    if rebuilding and not sdk.get_managed_singleton("snow.data.EquipDataManager") then return end
     if training or quest then
-        local s=equipped_hunter.ready(pm,p,go,index,quest and quest.data)
+        if not p:call("isMasterPlayer") or p:call("getPlayerIndex")~=index then return end
+        local s
+        if rebuilding then
+            if not p:call("isInput") then return end
+            s=equipped_hunter.rebuild_ready(pm,p,go,index,quest and quest.data)
+        else
+            -- Only the armor consumers change. Animation input locks, position
+            -- and vitals don't describe their readiness. Keep GUI handoffs out.
+            local gui=sdk.get_managed_singleton("snow.gui.GuiManager")
+            if not gui or gui:call("IsPlayerAllInputDisable") then return end
+            s=equipped_hunter.equipment(pm,p)
+        end
         if not s then return end
         return place,index,s
     end
+    if not p:call("isInput") then return end
     return place,index
 end
 
@@ -116,11 +127,11 @@ local function scope(quest)
     return area and "village/"..area:call("getCurrentAreaNo")
 end
 
-function M.worn_state(wanted,wait_factory)
+function M.worn_state(wanted,wait_factory,wait_rebuild)
     local pm,p,go,training,quest=scene()
     local observed,available,owners={},{},{}
     if not go or not go:call("get_Valid") then return {observed=observed} end
-    local complete=ready(pm,p,go,training,quest)~=nil
+    local complete=ready(pm,p,go,training,quest,wait_rebuild)~=nil
     local covered=0
     for _,i in ipairs(slots) do
         local part=p:call("getPartsGameObject",i)
@@ -152,7 +163,7 @@ function M.replay_state(id)
     if os.time()>saved_replay.expires then saved_replay=nil;json.dump_file(mount_path,{});return {} end
     local state=mounted.replay_state(saved_replay)
     if not state then saved_replay=nil;json.dump_file(mount_path,{});return {} end
-    local worn=M.worn_state(state.worn)
+    local worn=M.worn_state(state.worn,false,true)
     if not worn.ready then return {pending=true} end
     for path,old in pairs(state.worn) do
         if not worn.available[path] or worn.observed[path]~=old then return {pending=true} end
@@ -184,7 +195,7 @@ end
 
 -- Drop the live transaction and let the host schedule a new attempt from
 -- current files. Only scalar identities cross that boundary.
-local function defer_mount(tx,reason)
+local function defer_mount(tx,reason,wait_rebuild)
     local wanted={}
     for _,s in ipairs(slots) do
         local row=tx.parts[s]
@@ -193,15 +204,15 @@ local function defer_mount(tx,reason)
     local state={observed={}}
     if not reason:find("[normal equip]",1,true) then state=M.worn_state(wanted) end
     local retry=state.root==tx.old_address
-        and state.scope==tx.scope and state.complete_outfit
+        and state.scope==tx.scope and (state.complete_outfit or wait_rebuild)
     if retry then
         for _,s in ipairs(slots) do
             local row=tx.parts[s]
-            if not state.observed[row.mesh] or (row.before and state.observed[row.mesh]~=tostring(row.before)) then retry=false;break end
+            if row.mesh and (not state.observed[row.mesh] or (row.before and state.observed[row.mesh]~=tostring(row.before))) then retry=false;break end
         end
     end
     tx.deferred_mount={retry=retry==true,reason=reason,root=tx.old_address,scope=tx.scope,worn=state.observed,
-        wait_factory=reason:find("cold armor factory",1,true)~=nil}
+        wait_factory=reason:find("cold armor factory",1,true)~=nil,wait_rebuild=wait_rebuild}
     if log then log.info("[MHRS-Files-HotReload] "..(retry and "Waiting for in-place equipment: " or "Equipment deferred to natural equip: ")..reason) end
     return false
 end
@@ -342,7 +353,7 @@ function M.advance(tx,resources,scene_components)
             error("[village changed] Local hunter is no longer ready in "..location(tx))
         end
         if tx.gear then
-            local changed=equipped_hunter.difference(tx.gear,gear)
+            local changed=equipped_hunter.equipment_difference(tx.gear,gear)
             if changed then
                 if tx.full_outfit and not tx.reset_replay then return defer_mount(tx,changed) end
                 error("[village changed] "..changed.." ("..location(tx)..")")
@@ -372,6 +383,14 @@ function M.advance(tx,resources,scene_components)
             elseif not ok and log then log.info("[MHRS-Files-HotReload] Normal armor load: "..tostring(job)) end
         end
         assert(not tx.full_outfit or tx.reset_replay,"Full outfit requires an in-place mount")
+        -- Only this fallback replaces the hunter, so take a fresh, stationary
+        -- gameplay snapshot here. Never feed a mount snapshot to resume_hunter.
+        local safe,_,snapshot=ready(pm,p,go,training,quest,true)
+        if not safe then
+            if tx.reset_replay then error("[village changed] Waiting to recover the original hunter at rest") end
+            return defer_mount(tx,"Waiting for idle before whole-hunter reconstruction",true)
+        end
+        tx.gear=snapshot
         local eq=assert(sdk.get_managed_singleton("snow.data.EquipDataManager"))
         save_recovery(tx,pm)
         tx.started=true

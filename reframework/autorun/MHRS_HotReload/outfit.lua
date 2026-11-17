@@ -1093,7 +1093,7 @@ function M.run(action,req,native)
     end
     if action=="asset_awake" then return awakened(req.done or {}) end
     if action=="asset_worn_state" then
-        return (require("MHRS_HotReload.village_equipment").worn_state(req.paths,req.wait_factory))
+        return (require("MHRS_HotReload.village_equipment").worn_state(req.paths,req.wait_factory,req.wait_rebuild))
     end
     if action=="asset_part_recovery" then return require("MHRS_HotReload.village_equipment").replay_state() end
     if action=="asset_equipment_abort" then
