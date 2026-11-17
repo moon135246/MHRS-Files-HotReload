@@ -1210,7 +1210,8 @@ function M.run(action,req,native)
                 tx.mount.next_update=nil
             end
         end
-        return {pending=equipment_pending or equipment_batch~=nil or next(warming)~=nil,next_update=next_update,worn_mount=mount_outcome}
+        return {pending=equipment_pending or equipment_batch~=nil or next(warming)~=nil,
+                equipment_pending=equipment_pending,next_update=next_update,worn_mount=mount_outcome}
     end
     if action=="asset_removed" then
         assert(not M.active(),"Resource transaction active")
