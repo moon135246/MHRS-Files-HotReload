@@ -113,10 +113,9 @@ bool contains_request(DWORD bytes) {
 extern "C" __declspec(dllexport) int mhrs_request_changed(void*) {
     if (directory == INVALID_HANDLE_VALUE) {
         const auto now = GetTickCount64();
-        if (now >= next_open) {
-            next_open = now + 1000;
-            if (!open_watch()) close_watch();
-        }
+        if (now < next_open) return 0;
+        next_open = now + 1000;
+        if (!open_watch()) close_watch();
         return 1; // Also reconcile requests written before opening or after a failure.
     }
     const auto wait = WaitForSingleObject(operation.hEvent, 0);

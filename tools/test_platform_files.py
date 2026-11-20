@@ -5,10 +5,12 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
-from platform_files import PlatformFileConflict, PlatformFiles
+from platform_files import PlatformFileConflict, PlatformFiles, read_source_digest
+from watch_arm279 import signature
 
 
 class PlatformFilesTest(unittest.TestCase):
@@ -42,6 +44,48 @@ class PlatformFilesTest(unittest.TestCase):
         self.source.unlink()
         self.assertEqual(self.manager.prepare([self.source]), set())
         self.assertFalse(self.target.exists())
+
+    def test_overwrite_then_replace_between_watcher_passes_keeps_alias_owned(self):
+        self.manager.prepare([self.source])
+        self.source.write_bytes(b"intermediate color")
+        swap = self.source.with_suffix(".tmp")
+        swap.write_bytes(b"final color")
+        os.replace(swap, self.source)
+        self.assertEqual(self.target.read_bytes(), b"intermediate color")
+
+        self.assertEqual(self.manager.prepare([self.source]), {self.source})
+        self.assertTrue(self.target.samefile(self.source))
+        self.assertEqual(self.target.read_bytes(), b"final color")
+
+    def test_preverified_digest_is_reused_only_for_the_same_file_generation(self):
+        before = self.source.stat()
+        version = signature(self.source)
+        verified = read_source_digest(self.source, version)
+        self.assertIsNotNone(verified.stamp)
+        with patch("platform_files._digest", side_effect=AssertionError("Hashed unchanged file twice")):
+            self.assertEqual(self.manager.prepare([self.source], digests={self.source: verified}), {self.source})
+
+        # Creating the hard link advances ChangeTime. Verify the current
+        # generation again, then change only the bytes and ChangeTime.
+        verified = read_source_digest(self.source, version)
+        time.sleep(.03)
+        self.source.write_bytes(b"later")
+        os.utime(self.source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(signature(self.source), version)
+        self.assertEqual(self.manager.prepare([self.source], digests={self.source: verified}), {self.source})
+        journal = self.manager._journal(self.source.relative_to(self.root).as_posix())
+        record = json.loads(journal.read_bytes())
+        self.assertEqual(record["owner"]["sha256"], hashlib.sha256(b"later").hexdigest())
+
+    def test_recovery_retires_overwritten_link_after_source_removal(self):
+        self.manager.prepare([self.source])
+        self.source.write_bytes(b"intermediate color")
+        self.source.unlink()
+        self.assertEqual(self.target.read_bytes(), b"intermediate color")
+
+        self.restart()
+        self.assertFalse(self.target.exists())
+        self.assertFalse(list(self.manager.state.glob("*.json")))
 
     def test_user_platform_files_are_never_owned(self):
         self.target.write_bytes(b"first")

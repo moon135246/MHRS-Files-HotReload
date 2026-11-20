@@ -3,7 +3,7 @@
 package.path="reframework/autorun/?.lua;"..package.path
 local now,frame,warnings=0,nil,{}
 os.clock=function()return now end
-re={on_application_entry=function(name,f)assert(name=="UpdateBehavior");frame=f end,on_script_reset=function() end}
+re={on_application_entry=function(name,f)if name=="UpdateBehavior" then frame=f end end,on_script_reset=function() end}
 log={warn=function(msg)warnings[#warnings+1]=msg end}
 local village=require("MHRS_HotReload.village_equipment")
 local function upvalue(name,value)

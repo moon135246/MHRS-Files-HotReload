@@ -3,6 +3,7 @@
 -- hierarchy. The caller resumes only after the replacement mesh is ready.
 local M = {}
 local array_elements = require("MHRS_HotReload.array_elements")
+local retain_holder = require("MHRS_HotReload.retained_holder")
 local Chain = {}
 Chain.__index = Chain
 local resource_type = "via.motion.ChainResource"
@@ -115,8 +116,7 @@ function M.capture(components, candidates, expected, missing, requests, terminal
                     local old
                     if groups ~= nil then
                         local resource = assert(sdk.to_resource(sdk.to_ptr(ptr)))
-                        old = assert(resource:create_holder_global(holder_type))
-                        assert(pointer(old) == ptr and old:get_address() ~= holder:get_address(),
+                        old = assert(retain_holder(resource,holder_type,ptr,holder),
                             "Could not retain independent chain holder: " .. path)
                         requests[path] = resource_type
                     end
@@ -145,8 +145,7 @@ function Chain:stage(resources)
             if row.old then
                 local res = assert(resources[row.path], "Missing chain resource: " .. row.path)
                 row.fresh = res:get_address()
-                row.new = assert(res:create_holder_global(holder_type))
-                assert(pointer(row.new) == row.fresh, "Incorrect replacement chain: " .. row.path)
+                row.new = assert(retain_holder(res,holder_type,row.fresh), "Incorrect replacement chain: " .. row.path)
             else
                 row.groups = row.comp:call("get_ResourceGroupCount")
                 assert(type(row.groups) == "number", "Cannot verify current chain: " .. row.path)

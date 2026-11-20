@@ -1,7 +1,7 @@
 -- Callback-driven recovery must finish even when the worker stops polling.
 package.path="reframework/autorun/?.lua;"..package.path
 local update,reset
-re={on_application_entry=function(_,fn) update=fn end,on_script_reset=function(fn) reset=fn end}
+re={on_application_entry=function(name,fn) if name=="UpdateBehavior" then update=fn end end,on_script_reset=function(fn) reset=fn end}
 local ready,why=false,"Not yet reconstructed"
 local restores=0
 package.loaded["MHRS_HotReload.shadow_skeleton"]={

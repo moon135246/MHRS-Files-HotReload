@@ -1,12 +1,14 @@
 -- Bind resources through their current scene or equipped component slots.
 local M = {}
 local worn_armor = require("MHRS_HotReload.worn_armor")
+local retain_holder = require("MHRS_HotReload.retained_holder")
 local worn_chain = require("MHRS_HotReload.worn_chain")
 local shadow_skeleton = require("MHRS_HotReload.shadow_skeleton")
 local equipment_physics = require("MHRS_HotReload.equipment_physics")
 local hunter_roster = require("MHRS_HotReload.hunter_roster")
 local peer_equipment = require("MHRS_HotReload.peer_equipment")
 local peer_physics = require("MHRS_HotReload.peer_physics")
+local game_update = require("MHRS_HotReload.game_update")
 local kinds = {
     mesh={"via.render.Mesh","via.render.MeshResource","getMesh","setMesh"},
     chain={"via.motion.Chain","via.motion.ChainResource","get_ChainAsset","set_ChainAsset"},
@@ -60,11 +62,13 @@ end
 
 local array_elements = require("MHRS_HotReload.array_elements")
 
+local function current_scene()
+    return sdk.call_native_func(sdk.get_native_singleton("via.SceneManager"),
+        sdk.find_type_definition("via.SceneManager"),"get_CurrentScene")
+end
 local function scene_components(class,cache)
     if cache and cache[class] then return cache[class] end
-    local scene=sdk.call_native_func(sdk.get_native_singleton("via.SceneManager"),
-        sdk.find_type_definition("via.SceneManager"),"get_CurrentScene")
-    assert(scene,"Current scene unavailable")
+    local scene=assert(current_scene(),"Current scene unavailable")
     local component_type=sdk.typeof(class)
     local components=array_elements(scene:call("findComponents(System.Type)",component_type),class)
     if cache then cache[class]=components end
@@ -86,8 +90,8 @@ local function ordinary_owner(actors,go)
     local owner=hunter_roster.owner(actors,go)
     if owner.role=="master" or owner.role=="scene" then return owner.root:get_address() end
 end
-local function bindings(path,kind,ext,include_dormant,cache)
-    local found={}
+local function bindings(path,kind,ext,include_dormant,cache,scan)
+    local found=scan and scan.found or {}
     local wanted=type(path)=="table" and path or {[path:lower()]=true}
     local actors
     local function consider(b)
@@ -120,8 +124,9 @@ local function bindings(path,kind,ext,include_dormant,cache)
             end
         end
     end
-    local components=scene_components(kind[1],cache)
+    local components=scan and scan.components or scene_components(kind[1],cache)
     local visited={}
+    local matched_textures=scan and scan.matched or {}
     local function inspect(comp)
         if ext=="uvs" then
             if comp:call("get_Ready") then
@@ -136,7 +141,18 @@ local function bindings(path,kind,ext,include_dormant,cache)
             if comp:call("get_MaterialReady") then
                 for i=0,comp:call("get_MaterialNum")-1 do
                     for j=0,comp:call("getMaterialTextureNum",i)-1 do
-                        consider({comp=comp,i=i,j=j,kind=kind})
+                        local h=comp:call("getMaterialTexture",i,j)
+                        local name=h and h:call("get_ResourcePath")
+                        if name then
+                            local match=matched_textures[name]
+                            if match==nil then
+                                match=not not wanted[name:lower()]
+                                matched_textures[name]=match
+                            end
+                            if match then
+                                found[#found+1]={comp=comp,i=i,j=j,kind=kind,old=h,path=name}
+                            end
+                        end
                     end
                 end
             end
@@ -165,14 +181,58 @@ local function bindings(path,kind,ext,include_dormant,cache)
             consider({comp=comp,kind=kind,restart=(state==1 or state==2) and not comp:call("get_Paused")})
         else consider({comp=comp,kind=kind}) end
     end
-    for _,comp in ipairs(components) do
+    local slice_end=scan and os.clock()+.004
+    for i=scan and scan.cursor or 1,#components do
+        local comp=components[i]
         local ok,go=pcall(comp.call,comp,"get_GameObject")
         if ok and go then
             if go:call("get_Update") then inspect(comp)
             elseif include_dormant then pcall(inspect,comp) end
         end
+        if scan and i<#components and os.clock()>=slice_end then
+            scan.cursor=i+1
+            return
+        end
     end
     return found
+end
+
+function M.begin_texture_scan(req)
+    local wanted={}
+    for _,paths in ipairs({assert(req.paths),req.platform_files or {}}) do
+        for _,path in ipairs(paths) do
+            local key=path:lower()
+            if key:match("%.tex$") then wanted[key]=true end
+        end
+    end
+    if not next(wanted) then return end
+    local scene=current_scene()
+    if not scene then return end
+    local components=array_elements(scene:call("findComponents(System.Type)",sdk.typeof(kinds.tex[1])),kinds.tex[1])
+    return {scene=scene,wanted=wanted,components=components,found={},matched={},cursor=1}
+end
+
+function M.advance_texture_scan(scan)
+    assert(current_scene()==scan.scene,"[village changed] Scene changed while checking texture users")
+    local ok,rows=pcall(bindings,scan.wanted,kinds.tex,"tex",true,nil,scan)
+    if not ok then return {} end
+    if not rows then return end
+    local current={}
+    for _,row in ipairs(rows) do
+        -- A mesh can be destroyed or change material slots while the scan
+        -- yields. Use only bindings that still match the captured path.
+        local valid,h=pcall(function()
+            local go=row.comp:call("get_GameObject")
+            if not go or not go:call("get_Valid") then return end
+            local current_holder=holder(row)
+            if current_holder and current_holder:call("get_ResourcePath")==row.path then return current_holder end
+        end)
+        if valid and h then
+            row.old=h
+            current[#current+1]=row
+        end
+    end
+    return current
 end
 
 local function binding_report(list,ext)
@@ -268,8 +328,8 @@ local function material_state(mesh,policy)
                         if ptr~=0 then
                             if not pins[ptr] then
                                 local r=assert(sdk.to_resource(sdk.to_ptr(ptr)))
-                                pins[ptr]=assert(r:create_holder_global("via.render.TextureResourceHolder"))
-                                assert(pins[ptr]:read_qword(0x10)==ptr,"Could not retain worn texture")
+                                pins[ptr]=assert(retain_holder(r,"via.render.TextureResourceHolder",ptr,h),
+                                    "Could not retain worn texture")
                             end
                             h=pins[ptr]
                         end
@@ -351,7 +411,7 @@ local function restore_when_ready(b)
         end
     end
 end
-re.on_application_entry("UpdateBehavior",function()
+game_update.register(function()
     for id,entry in pairs(deferred_materials) do
         local ok,finished=pcall(function()
             if not entry.go:call("get_Valid") then return true end
@@ -513,6 +573,13 @@ end
 local prefab_instances,prefab_values={},{}
 local prefab_generations={}
 local tracked={}
+local function live_tracked_object(object)
+    -- The Lua wrapper can outlive the native object. Its validity query can
+    -- throw, so discard that tracker entry during the same cleanup pass.
+    local ok,valid=pcall(object.call,object,"get_Valid")
+    return ok and valid
+end
+
 local function track_instance(map,address,entry)
     entry.map,entry.address=map,address
     map[address]=entry
@@ -529,9 +596,9 @@ end
 local function pin_prefab_instances(wanted)
     local groups={}
     for _,entry in pairs(prefab_instances) do
-        if wanted[entry.path] and not entry.generation and entry.go:call("get_Valid") then
+        if wanted[entry.path] and not entry.generation and live_tracked_object(entry.go) then
             local factory=entry.factory
-            if factory and factory:call("get_Valid") and factory:call("get_Ready") then
+            if factory and live_tracked_object(factory) and factory:call("get_Ready") then
                 local name=factory:call("get_ResourcePath")
                 local group=groups[name]
                 if name and not group then
@@ -572,7 +639,7 @@ local function update_prefab(path,edits)
     path=path:lower()
     local targets={}
     for address,entry in pairs(prefab_instances) do
-        if entry.path==path and entry.go:call("get_Valid") then targets[address]=entry.go end
+        if entry.path==path and live_tracked_object(entry.go) then targets[address]=entry.go end
     end
     if path==marker_path then
         for _,gui in ipairs(scene_components("via.gui.GUI")) do
@@ -637,7 +704,7 @@ end
 -- added during a pass are picked up on the next pass. Pinned old roots stay
 -- tracked even if a new instance has since claimed the same map entry.
 local next_cleanup,cleanup_cursor=0,0
-re.on_application_entry("UpdateBehavior",function()
+game_update.register(function()
     if cleanup_cursor==0 then
         if #tracked==0 or os.clock()<next_cleanup then return end
         cleanup_cursor=#tracked
@@ -647,7 +714,7 @@ re.on_application_entry("UpdateBehavior",function()
         cleanup_cursor=i-1
         local entry=tracked[i]
         local current=entry.map[entry.address]==entry
-        if (not current and not entry.generation) or not entry.go:call("get_Valid") then
+        if (not current and not entry.generation) or not live_tracked_object(entry.go) then
             if current then entry.map[entry.address]=nil end
             local group=entry.generation
             if group then
@@ -903,7 +970,7 @@ end
 
 -- Enumerate once per pass. Spread ready views, their two object queries and
 -- individual UV bindings across frames, including on an unchanged HUD.
-re.on_application_entry("UpdateBehavior",function()
+game_update.register(function()
     if not M.active() and not equipment_batch then equipment_physics.update(os.clock()) end
     if M.active() then gui_scan=nil;return end
     if check_preview_targets then
@@ -969,19 +1036,23 @@ local function release_equipment()
     assert(restored,reason)
 end
 
-local function request_equipment(equipment,platform,expected)
-    local batch={platform=platform,materials={}}
+local function queue_equipment(equipment,platform,expected)
+    local batch={platform=platform,materials={},requests={},request_index=1,request_updates=0,request_peak=0}
     -- The first request after retirement determines the source for all users
-    -- of that spelling. Publish texture keys before the MDF requests them.
+    -- of that spelling. Start texture keys before the MDF requests them.
     for _,ext in ipairs({"tex","mesh","mdf2","chain","mot"}) do
         for name,kind in pairs(equipment) do
             if name:lower():sub(-#ext-1)=="."..ext then
                 local path=platform[name] and "@"..name or name
-                equipment_refs[name]=assert(sdk.create_resource(kind,path),"Could not load equipment: "..path)
+                batch.requests[#batch.requests+1]={name=name,kind=kind,path=path}
                 if ext=="mdf2" then batch.materials[name]=expected[name:lower()] or false end
             end
         end
     end
+    return batch
+end
+
+local function write_equipment_requests(platform)
     for _,file in ipairs({"equipment-paths.txt","equipment-platform.txt"}) do
         local f=assert(io.open("MHRS-Files-HotReload/"..file,"wb"))
         local ok,err=pcall(function()
@@ -997,7 +1068,52 @@ local function request_equipment(equipment,platform,expected)
         assert(ok,err)
         assert(closed,why)
     end
-    return batch
+end
+
+local function reopen_factories(warm)
+    for key,factory in pairs(warm) do
+        local ready=factory:call("get_Ready")
+        if ready then
+            factory:call("set_Standby",false)
+            factory:call("set_Standby",true)
+        end
+        warming[key]={factory=factory,reopen=not ready}
+    end
+end
+
+function M.start_equipment_loads()
+    local batch=equipment_batch
+    if not batch or not batch.requests or batch.request_error then return end
+    local ok,err=pcall(function()
+        local started=os.clock()
+        local requests=batch.requests
+        if batch.request_index<=#requests then
+            batch.request_updates=batch.request_updates+1
+            local last=math.min(batch.request_index+7,#requests)
+            repeat
+                local request=requests[batch.request_index]
+                if request.physics then
+                    request.physics:request(request.platform,request.missing)
+                else
+                    equipment_refs[request.name]=assert(sdk.create_resource(request.kind,request.path),
+                        "Could not load equipment: "..request.path)
+                end
+                batch.request_index=batch.request_index+1
+            until batch.request_index>last or os.clock()-started>=.004
+            batch.request_peak=math.max(batch.request_peak,os.clock()-started)
+        end
+        if batch.request_index<=#requests then return end
+        write_equipment_requests(batch.platform)
+        -- The factories can ask for the same dependencies as soon as they
+        -- reopen. Explicit platform requests must establish their keys first.
+        reopen_factories(batch.warm)
+        if #requests>1 then
+            log.info(("[MHRS-Files-HotReload] Started %d equipment requests across %d updates (longest start %.1f ms)")
+                :format(#requests,batch.request_updates,batch.request_peak*1000))
+        end
+        batch.requests,batch.warm=nil,nil
+    end)
+    if not ok then batch.request_error=err end
 end
 
 local function equipment_factories(wanted,visit)
@@ -1066,7 +1182,7 @@ function M.reset(native)
     tracked,prefab_instances,retired_visuals={},{},{}
     cleanup_cursor=0
 end
-function M.run(action,req,native)
+function M.run(action,req,native,texture_owners)
     if action=="asset_hunter_roster" then
         return {hunters=hunter_roster.describe(hunter_roster.read()),peer_last_events=peer_equipment.status(),
             peer_physics_events=peer_physics.status()}
@@ -1102,6 +1218,15 @@ function M.run(action,req,native)
     end
     if action=="asset_factories_ready" then
         local next_update,mount_outcome
+        if equipment_batch and equipment_batch.request_error then
+            local reason=equipment_batch.request_error
+            release_equipment()
+            error(reason)
+        end
+        if equipment_batch and equipment_batch.requests then
+            local batch=equipment_batch
+            return {pending=true,equipment_pending=true,next_update=#batch.requests-batch.request_index<8}
+        end
         if equipment_pending then
             local state=native("equipment_ready")
             if state=="equipment platform source mismatch" then
@@ -1149,7 +1274,9 @@ function M.run(action,req,native)
                 local peers=peer_equipment.advance(batch.peers,scene_components,equipment_refs,material_state,restore_when_ready)
                 local physics=peer_physics.advance(batch.peer_physics,scene_components,equipment_refs,material_state,restore_when_ready)
                 if not batch.local_done then
-                    batch.local_done=not worn_armor.advance(batch,scene_components,equipment_refs,material_state,restore_when_ready)
+                    local pending
+                    pending,next_update=worn_armor.advance(batch,scene_components,equipment_refs,material_state,restore_when_ready)
+                    batch.local_done=not pending
                 elseif batch.vertex_fallback and not batch.village and not worn_armor.vertices_ready(batch) then
                     return true
                 end
@@ -1206,7 +1333,7 @@ function M.run(action,req,native)
             if not ok then error(pending) end
             local tx=equipment_batch and equipment_batch.village
             if tx and tx.mount and not tx.mount_error and not equipment_batch.local_done then
-                next_update=tx.mount.next_update
+                next_update=next_update or tx.mount.next_update
                 tx.mount.next_update=nil
             end
         end
@@ -1322,7 +1449,10 @@ function M.run(action,req,native)
         end
         for ext,wanted in pairs(by_ext) do
             if kinds[ext] and ext~="user" then
-                local ok,owners=pcall(bindings,wanted,kinds[ext],ext,true,components_by_type)
+                local ok,owners=true,texture_owners
+                if ext~="tex" or not owners then
+                    ok,owners=pcall(bindings,wanted,kinds[ext],ext,true,components_by_type)
+                end
                 if ok then
                     for _,owner in ipairs(owners) do
                         add(owner.path)
@@ -1368,7 +1498,7 @@ function M.run(action,req,native)
             elseif ext=="pfb" then
                 pin_prefab_instances(wanted)
                 local function visit(factory)
-                    if not factory or not factory:call("get_Valid") then return end
+                    if not factory or not live_tracked_object(factory) then return end
                     local name=factory:call("get_ResourcePath")
                     if name and wanted[name:lower()] then
                         add(name)
@@ -1434,7 +1564,10 @@ function M.run(action,req,native)
         local chain_components={}
         local peer_effects,chain_actors
         local assemble_parts,positions_only=false,false
-        if not req.reset_replay and not req.worn_guard and (next(armor_candidates) or next(req.shadow_skeletons or {}) or next(physics_spec.chains or {})) then
+        local updates_chains=next(physics_spec.chains or {})~=nil
+        if not req.reset_replay and not req.worn_guard
+                and (((armor_mesh_requested or physics) and next(armor_candidates))
+                    or next(req.shadow_skeletons or {}) or updates_chains) then
             chain_components=scene_components("via.motion.Chain",components_by_type)
             peer_effects,chain_components,chain_actors=peer_physics.capture(chain_components,req,live,equipment,function(path,ext)
                 add_path(path)
@@ -1447,31 +1580,39 @@ function M.run(action,req,native)
             local hunter=master and master:call("get_GameObject")
             local only=next(live)
             local prior,retained,stock,slot_no
-            if chain_actors and only and not next(live,only) and armor_count==1 and (req.peer_meshes or {})[only]
-                    and not next(req.shadow_skeletons or {}) and not next(physics_spec.chains or {}) then
+            local mesh_only=only~=nil
+            for path in pairs(live) do
+                if not path:match("^player/mod/.+%.mesh$") or path:match("/[fm]_shadow%.mesh$") then mesh_only=false;break end
+            end
+            if chain_actors and mesh_only and not next(req.shadow_skeletons or {}) and not next(physics_spec.chains or {}) then
                 for id,row in pairs(armor_candidates) do
+                    local path=row.mesh.path:lower()
                     local part=chain_actors.parts[row.go:get_address()]
-                    local instance=armor_instances[id]
-                    retained=instance and instance.go==row.go and instance.queued_vertex
-                        and instance.queued_vertex:read_qword(0x10)==row.mesh.original
-                    stock=worn_armor.resident_stock(row,instance,part)
-                    prior=retained or stock or peer_equipment.stock_layout(only,row.mesh.original,
-                        not worn_armor.needs_reentry(row,instance,armor_origins,startup))
                     slot_no=part and part.slot
-                    if row.mesh.path:lower()==only and part and part.entry and part.entry.role=="master"
-                            and part.entry.scope and row.wearer_owns and part.entry.player==master and part.go==row.go and prior then
-                        local slot=part.slot
-                        row.vertex_owner=function(go)
-                            return (not go or go==row.go) and row.wearer_owns(row.go)
-                                and pm:call("findMasterPlayer")==master and master:call("get_GameObject")==hunter
-                                and master:call("getPartsGameObject",slot)==row.go and hunter_roster.render_part(row.go)==row.comp
+                    if live[path] and (req.peer_meshes or {})[path] and part and part.entry
+                            and part.entry.role=="master" and part.entry.scope and row.wearer_owns
+                            and part.entry.player==master and part.go==row.go then
+                        local instance=armor_instances[id]
+                        retained=instance and instance.go==row.go and instance.queued_vertex
+                            and instance.queued_vertex:read_qword(0x10)==row.mesh.original
+                        stock=worn_armor.resident_stock(row,instance,part)
+                        prior=retained or stock or peer_equipment.stock_layout(path,row.mesh.original,
+                            not worn_armor.needs_reentry(row,instance,armor_origins,startup))
+                        if prior then
+                            local slot=part.slot
+                            row.retained_vertex=retained
+                            row.vertex_owner=function(go)
+                                return (not go or go==row.go) and row.wearer_owns(row.go)
+                                    and pm:call("findMasterPlayer")==master and master:call("get_GameObject")==hunter
+                                    and master:call("getPartsGameObject",slot)==row.go and hunter_roster.render_part(row.go)==row.comp
+                            end
                         end
                     end
                 end
             end
             local reason
             assemble_parts,positions_only,reason=worn_armor.requires_part_assembly(armor_candidates,live,chain_components,hunter,physics_spec.chains or {})
-            assemble_parts=assemble_parts or full_owner~=nil or req.reset_replay~=nil
+            assemble_parts=assemble_parts or (full_owner~=nil and not positions_only) or req.reset_replay~=nil
             if only and not next(live,only) and only:match("^player/mod/.+%.mesh$") then
                 log.info(("[MHRS-Files-HotReload] Worn mesh route %s candidates=%d slot=%s incoming=%s old=%s queued_old=%s worn_pak=%s wait=%s assemble_parts=%s (%s)")
                     :format(only,armor_count,tostring(slot_no),tostring((req.peer_meshes or {})[only]==true),
@@ -1481,17 +1622,19 @@ function M.run(action,req,native)
             if positions_only and not assemble_parts then
                 for id,row in pairs(armor_candidates) do
                     row.mdf2.keep=true
-                    if pause_hunter and not retained then
+                    if pause_hunter and not row.retained_vertex then
                         local resource=assert(sdk.to_resource(sdk.to_ptr(row.mesh.original)))
-                        local pin=assert(resource:create_holder_global(row.mesh.kind[2].."Holder"))
-                        assert(pin:read_qword(0x10)==row.mesh.original,"Could not retain queued vertex source")
+                        local pin=assert(retain_holder(resource,row.mesh.kind[2].."Holder",row.mesh.original,
+                            row.comp:call(row.mesh.kind[3])),"Could not retain queued vertex source")
                         armor_instance(id,row.go).queued_vertex=pin
                     end
                 end
             end
         end
+        -- A material-only swap keeps the mesh and its joint mapping, so its
+        -- attached chains can keep running through the renderer update.
         if not pause_hunter and not assemble_parts and not positions_only
-                and (shadow or next(armor_candidates) or next(physics_spec.chains or {})) then
+                and (shadow or updates_chains or ((armor_mesh_requested or physics) and next(armor_candidates))) then
             local protected=armor_candidates
             if shadow then
                 protected={}
@@ -1569,11 +1712,9 @@ function M.run(action,req,native)
             end
         end
         if next(equipment) or physics or chains or village or (peer_effects and #peer_effects>0) then
-            local ok,batch=pcall(request_equipment,equipment,platform,req.expected_materials or {})
-            if not ok then release_equipment();error(batch) end
+            local batch=queue_equipment(equipment,platform,req.expected_materials or {})
             if physics then
-                local loaded,why=pcall(physics.request,physics,platform_paths,req.missing or {})
-                if not loaded then release_equipment();error(why) end
+                batch.requests[#batch.requests+1]={physics=physics,platform=platform_paths,missing=req.missing or {}}
                 batch.physics=physics
             end
             batch.candidates=armor_candidates
@@ -1615,15 +1756,8 @@ function M.run(action,req,native)
         -- after the resource key is retired. Reopen the existing factory as
         -- well so its next instantiate() uses the replacement hierarchy.
         local factory_count=0
-        for key,factory in pairs(warm) do
-            local ready=factory:call("get_Ready")
-            if ready then
-                factory:call("set_Standby",false)
-                factory:call("set_Standby",true)
-            end
-            warming[key]={factory=factory,reopen=not ready}
-            factory_count=factory_count+1
-        end
+        for _ in pairs(warm) do factory_count=factory_count+1 end
+        if equipment_batch then equipment_batch.warm=warm else reopen_factories(warm) end
         local counts=assert(io.open("MHRS-Files-HotReload/retired-counts.txt","r"))
         local results,totals={},{}
         for _,name in ipairs(names) do
@@ -1936,6 +2070,6 @@ function M.run(action,req,native)
     end
     return {state=state,address=address,bindings=#list}
 end
-re.on_application_entry("UpdateBehavior",peer_equipment.tick)
-re.on_application_entry("UpdateBehavior",peer_physics.tick)
+game_update.register(peer_equipment.tick)
+game_update.register(peer_physics.tick)
 return M

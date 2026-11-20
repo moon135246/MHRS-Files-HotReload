@@ -2,6 +2,7 @@ local M = {}
 local equipped_parts = require("MHRS_HotReload.equipped_parts")
 local equipped_hunter = require("MHRS_HotReload.equipped_hunter")
 local quest_context = require("MHRS_HotReload.quest_context")
+local game_update = require("MHRS_HotReload.game_update")
 local mounted
 local mesh_type = "via.render.Mesh"
 local slots={0,1,2,3,4}
@@ -337,7 +338,7 @@ local function recover_cancelled(j)
     return true
 end
 
-re.on_application_entry("UpdateBehavior",function()
+game_update.register(function()
     if current_mount and current_mount.mount and current_mount.mount.retiring then
         local ok,why=pcall(mounted.repair_registry,current_mount.mount)
         if not ok and not current_mount.registry_warned then

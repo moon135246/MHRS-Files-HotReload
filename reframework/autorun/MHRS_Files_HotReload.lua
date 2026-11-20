@@ -5,7 +5,8 @@ local data = "MHRS-Files-HotReload/"
 local mesh_type = sdk.typeof("via.render.Mesh")
 local arm_mdf = require("MHRS_HotReload.arm_mdf")
 local outfit = require("MHRS_HotReload.outfit")
-local next_check, fast_until, last_id = 0, 0, nil
+local game_update = require("MHRS_HotReload.game_update")
+local next_read, next_reconcile, dirty, last_id = 0, 0, false, nil
 
 local function arm()
     local manager = sdk.get_managed_singleton("snow.player.PlayerManager")
@@ -168,10 +169,10 @@ local function diagnose(mesh)
         identical = bound == res:get_address()}
 end
 
-local function run(action,req)
+local function run(action,req,texture_owners)
     if action:sub(1,6)=="asset_" then
         assert(not native_job,"Arm material transaction active")
-        return outfit.run(action,req,native)
+        return outfit.run(action,req,native,texture_owners)
     end
     if action:sub(1,7)=="native_" then assert(not outfit.active(),"Outfit transaction active") end
     if action=="native_abort" then return native_action(action) end
@@ -202,28 +203,71 @@ re.on_script_reset(function()
 end)
 -- A request is executed once per id. The host requests another independent sample
 -- after the engine has had time to finish rendering with the assigned holder.
-local initial = json.load_file(data .. "request.json")
+local function read_request()
+    local f = io.open(data .. "request.json", "rb")
+    if not f then return end
+    local raw = f:read("*a")
+    f:close()
+    if not raw or raw == "" then return end
+    local ok, request = pcall(json.load_string, raw)
+    if ok and type(request) == "table" and type(request.id) == "string" and type(request.action) == "string" then
+        return request
+    end
+end
+local initial = read_request()
 last_id = initial and initial.id
 json.dump_file(data .. "status.json", {state = "loaded"})
 local start_watcher = embedded and embedded.start_watcher or package.loadlib(watch_dll, "mhrs_start_watcher")
 if not (start_watcher and start_watcher(true)) then
     log.warn("[MHRS-Files-HotReload] Packaged watcher unavailable. Check the installation or run tools/watch_outfit.py from source.")
 end
-re.on_application_entry("UpdateBehavior", function()
-    local now = os.clock()
-    if now < next_check then return end
-    next_check = request_changed and now < fast_until and now or now + 0.25
-    if request_changed and not request_changed(true) then return end
-    local req = json.load_file(data .. "request.json")
-    if not req or type(req.id) ~= "string" or req.id == last_id then
-        -- The native fallback can report dirty repeatedly after an I/O error.
-        next_check = now + 0.25
+local removal
+local function reply(req,ok,value)
+    json.dump_file(data .. "status.json", {id = req.id, action = req.action, ok = ok, result = ok and value or tostring(value)})
+end
+local function resume_removal()
+    local ok,owners=pcall(outfit.advance_texture_scan,removal.scan)
+    if ok and not owners then return end
+    local req=removal.request
+    removal=nil
+    local current=read_request()
+    if not current or current.id~=req.id then
+        next_reconcile=0 -- Recheck the mailbox on the next update.
         return
+    end
+    last_id=req.id
+    local value=owners
+    if ok then ok,value=pcall(run,req.action,req,owners) end
+    reply(req,ok,value)
+end
+game_update.register(function()
+    outfit.start_equipment_loads()
+    if removal then resume_removal();return end
+    local now = os.clock()
+    -- Probe the already armed event each update. Leave disk reads to actual
+    -- notifications, with a periodic check for missed events or older hosts.
+    if request_changed and request_changed(true) then dirty = true end
+    if now < next_read or (not dirty and now < next_reconcile) then return end
+    local notified = dirty
+    dirty = false
+    next_reconcile = now + (request_changed and 1 or 0.25)
+    local req = read_request()
+    if not req or req.id == last_id then
+        next_read = now + 0.025
+        -- A notification can arrive while an editor still has the request
+        -- open. Give that read one prompt retry even without another signal.
+        if not req and notified then next_reconcile = now + 0.05 end
+        return
+    end
+    if req.action=="asset_removed" then
+        local ok,scan=pcall(outfit.begin_texture_scan,req)
+        if ok and scan then
+            removal={request=req,scan=scan}
+            resume_removal()
+            return
+        end
     end
     last_id = req.id
     local ok, value = pcall(run, req.action, req)
-    json.dump_file(data .. "status.json", {id = req.id, action = req.action, ok = ok, result = ok and value or tostring(value)})
-    -- During a burst, service the next ready command on the next engine update.
-    -- A silent channel returns to its normal idle cadence.
-    if request_changed then fast_until = os.clock() + 0.5; next_check = 0 end
+    reply(req,ok,value)
 end)

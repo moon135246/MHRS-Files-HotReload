@@ -8,11 +8,11 @@ local serial = 100
 local function address(self) return self.id end
 local function holder(res, name)
     serial = serial+1
-    return {id=serial, get_address=address, read_qword=function(_,off) assert(off==0x10);return res end,
+    return {id=serial, get_address=address, add_ref=function() end, read_qword=function(_,off) assert(off==0x10);return res end,
         call=function(_,m) assert(m=="get_ResourcePath");return name end}
 end
 local function resource(id)
-    return {id=id, get_address=address, create_holder_global=function(_,typ)
+    return {id=id, get_address=address, create_holder=function(_,typ)
         assert(typ=="via.motion.ChainResourceHolder");return holder(id)
     end}
 end

@@ -1,6 +1,7 @@
 -- Run from the repository root with Lua 5.4: lua tools/test_worn_armor.lua
 package.path = "reframework/autorun/?.lua;" .. package.path
 local armor = require("MHRS_HotReload.worn_armor")
+local retain_holder = require("MHRS_HotReload.retained_holder")
 
 local kinds = {
     mesh={"component","MeshResource","getMesh","setMesh"},
@@ -15,6 +16,7 @@ local function holder(path, ptr)
         ptr=ptr, id=next_holder,
         get_address=function(h) return h.id end,
         read_qword=function(h) return h.ptr end,
+        add_ref=function(h) h.retained=true end,
         call=function(_, key) assert(key=="get_ResourcePath"); return path end,
     }
 end
@@ -22,9 +24,18 @@ local function resource(path, ptr)
     return {
         get_address=function() return ptr end,
         release=function() end,
-        create_holder_global=function() return holder(path,ptr) end,
+        create_holder=function() return holder(path,ptr) end,
     }
 end
+local current_holder = holder("sample.mesh",1)
+local clone = holder("sample.mesh",1)
+local candidate = current_holder
+local allocator = {create_holder=function() return candidate end}
+assert(not retain_holder(allocator,"MeshResourceHolder",1,current_holder) and not current_holder.retained)
+candidate = holder("sample.mesh",0)
+assert(not retain_holder(allocator,"MeshResourceHolder",1,current_holder) and not candidate.retained)
+candidate = clone
+assert(retain_holder(allocator,"MeshResourceHolder",1,current_holder) == clone and clone.retained)
 for _, spec in ipairs({{"sample.mesh",1},{"sample.mdf2",2},{"sample.mesh",3},{"sample.mdf2",4}}) do
     local r = resource(spec[1],spec[2])
     snapshots[spec[2]], resources[spec[1]] = r,r
@@ -178,6 +189,27 @@ before=setters
 b.candidates[1].vertex_owner=function() return false end
 assert(not pcall(armor.vertices_ready,b),"a changed owner must cancel the late commit")
 assert(not pcall(advance,b,parts) and setters==before,"rollback wrote to a new owner")
+
+-- One request can carry several certified rows. Commit them together only
+-- after the scene still contains every captured renderer.
+parts={component(1),component(2)}
+b=batch(parts)
+for _,row in pairs(b.candidates) do
+    row.vertex_owner=function() return true end
+    row.mdf2.keep=true
+end
+before=setters
+assert(advance(b,parts) and not advance(b,parts))
+assert(setters==before+2 and parts[1].mesh.ptr==3 and parts[2].mesh.ptr==3)
+assert(parts[1].mdf.ptr==2 and parts[2].mdf.ptr==2)
+parts={component(1),component(2)}
+b=batch(parts)
+for _,row in pairs(b.candidates) do
+    row.vertex_owner=function() return true end
+    row.mdf2.keep=true
+end
+before=setters
+assert(not pcall(advance,b,{parts[1]}) and setters==before)
 
 -- A different runtime joint at index zero must select the ordinary equipment
 -- loader without making a speculative mesh call.

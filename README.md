@@ -4,12 +4,12 @@
 
 ## 用 根目录 安装
 
-退出游戏，解压 MHRS-Files-HotReload-v1.0.0.zip，把包内的 reframework 合并到游戏根目录（MonsterHunterRise.exe 所在目录）
+退出游戏，下载并解压 `MHRS-Files-HotReload-v1.2.0.zip`，把包内的 `reframework` 合并到游戏根目录（`MonsterHunterRise.exe` 所在目录）。[1.2.0 发布页](https://github.com/moon135246/MHRS-Files-HotReload/releases/tag/v1.2.0)
 
 ## 用 Fluffy 安装
 
 1. 先安装崛起版 REFramework，启用 **LooseFileLoader**。从旧版升级时，退出游戏并停止之前手动运行的 Python 监听器。
-2. 在下方 Assets 下载 **MHRS-Files-HotReload-v1.0.0.zip**。在 Fluffy Mod Manager 中选择 **Monster Hunter Rise**，拖入整个 ZIP，或将 ZIP 放入 Fluffy 的 `Games/MHRISE/Mods` 并刷新列表。启用 **MHRS-Files-HotReload**。
+2. 从发布页的 Assets 下载 **MHRS-Files-HotReload-v1.2.0.zip**。在 Fluffy Mod Manager 中选择 **Monster Hunter Rise**，拖入整个 ZIP，或将 ZIP 放入 Fluffy 的 `Games/MHRISE/Mods` 并刷新列表。启用 **MHRS-Files-HotReload**。[1.2.0 安装包](https://github.com/moon135246/MHRS-Files-HotReload/releases/download/v1.2.0/MHRS-Files-HotReload-v1.2.0.zip)
 3. 启动游戏，插件会在后台自动开始监听。要在游戏运行中新增或删除文件，请在 **LooseFileLoader → Debug** 中关闭 **Enable file cache**。实测 REFramework 版本在游戏重启后会重新勾选此项。
 4. 编辑或删除 `natives/stm` 下的资源。运行记录位于游戏目录的 `reframework/data/MHRS-Files-HotReload/watcher.log`。日志显示 `Next use` 时，换装或重新进入对应场景可让新对象读取当前资源。退出游戏后可在 Fluffy 中停用插件。
 
@@ -33,6 +33,7 @@
 
 ## 更新日志
 
+- **1.2.0** 缩短换色和整套换装的等待，分帧创建装备资源。修复连续切换时旧贴图残留，以及部分 MDF2 导致只更新骨架的问题。
 - **1.1.0** 单件与整套防具按当前挂点刷新，贴图、模板就绪后分组更新。
 - **1.0.9** 修复开场演出结束后仍无法换装的问题，换场后重新匹配装备。
 - **1.0.8** 记录缺失的 MMTR 路径，补装模板后继续换装。

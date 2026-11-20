@@ -18,10 +18,11 @@ end
 local function holder(id,path)
     local h=object({get_ResourcePath=path})
     function h:read_qword(offset) assert(offset==0x10);return id end
+    function h:add_ref() end
     return h
 end
 local function resource(id,path)
-    return {create_holder_global=function() return holder(id,path) end}
+    return {create_holder=function() return holder(id,path) end,get_address=function() return id end}
 end
 local function fixture()
     local s={writes={},simulations={},pieces={}}

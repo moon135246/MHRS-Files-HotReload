@@ -12,10 +12,12 @@ end
 local root_joint=joint("Root")
 local joints={root_joint,joint("Head",root_joint)}
 local function resource(id,path)
-    local r={}
-    function r:create_holder_global()
+    local r={get_address=function() return id end}
+    function r:create_holder()
         local h=object({get_ResourcePath=function() return path end})
         function h:read_qword(offset) assert(offset==0x10);return id end
+        function h:get_address() return self end
+        function h:add_ref() end
         return h
     end
     return r
@@ -23,7 +25,7 @@ end
 local old=resource(1,"player/mod/f/bone/f_shadow.mesh")
 local fresh=resource(2,"player/mod/f/pl279/f_shadow.mesh")
 local unrelated=resource(3,"player/mod/f/pl279/f_shadow.mesh")
-local current=old:create_holder_global()
+local current=old:create_holder()
 local root, mesh, tr
 local reset_count, constructed=0,true
 local motion=object({get_JointsConstructed=function() return constructed end,
@@ -74,7 +76,7 @@ for _=1,4 do assert(shadow.verify(txn)==false) end
 assert(reset_count==2)
 positions.Head.y=.125;assert(shadow.verify(txn))
 -- Avoid overwriting an equipment choice that superseded the old operation.
-current=unrelated:create_holder_global();shadow.abort(txn);assert(current:read_qword(0x10)==3)
+current=unrelated:create_holder();shadow.abort(txn);assert(current:read_qword(0x10)==3)
 names[1]="f_body088"
 assert(shadow.capture(player,profiles).scope=="bone")
 expected.Head.parent="Foreign"

@@ -20,8 +20,13 @@ local function write(name, data)
 end
 local cache, created, uid = {}, {}, 0
 local source = "First"
+local clock,original_clock=0,os.clock
+os.clock=function() return clock end
+local fail_path
 local function request(_, name)
+    clock=clock+.0025
     local key = name:gsub("^@", "")
+    if key==fail_path then return nil end
     if not cache[key] then
         uid = uid + 1
         local res = {id=uid, refs=0, source=source, platform=name:sub(1,1)=="@"}
@@ -39,6 +44,7 @@ local function request(_, name)
 end
 re = {on_application_entry=function() end, on_script_reset=function() end}
 json = {dump_file=function() end}
+log = {info=function() end}
 sdk = {
     hook=function() end, get_native_singleton=function() end,
     get_managed_singleton=function() end,
@@ -73,10 +79,14 @@ local function native(action)
 end
 local mesh, mdf, tex = "player/mod/demo.mesh", "player/mod/demo.mdf2", "player/mod/diffuse.tex"
 local mixed = "player/mod/Diffuse.tex"
+local function start_all()
+    for _=1,8 do outfit.start_equipment_loads() end
+end
 local function batch(paths, options)
     options.paths = paths
     local result = outfit.run("asset_removed", options, native)
     if result.equipment then
+        start_all()
         local done = outfit.run("asset_factories_ready", {}, native)
         assert(not done.pending)
         return done
@@ -84,8 +94,14 @@ local function batch(paths, options)
     return result
 end
 local paths = {mesh,mdf,tex}
-local options = {platform_files=paths, aliases={[tex]={mixed}}, expected_materials={[mdf]={"First"}}}
-assert(not batch(paths,options).source_mismatch)
+local options = {paths=paths,platform_files=paths, aliases={[tex]={mixed}}, expected_materials={[mdf]={"First"}}}
+assert(outfit.run("asset_removed",options,native).equipment and #created==0)
+assert(outfit.run("asset_factories_ready",{},native).pending,"checked older readiness data")
+outfit.start_equipment_loads()
+assert(#created==2 and cache[mesh]==nil and cache[mdf]==nil,"resource creation did not yield")
+assert(outfit.run("asset_factories_ready",{},native).pending,"polled a partial generation")
+outfit.start_equipment_loads()
+assert(not outfit.run("asset_factories_ready",{},native).pending)
 assert(created[1]:match("%.tex$") and created[2]:match("%.tex$"))
 assert(created[3] == "@"..mesh and created[4] == "@"..mdf)
 local original = {}
@@ -133,9 +149,18 @@ assert(not next(cache))
 source="First"
 options.expected_materials[mdf]={"First"}
 assert(outfit.run("asset_removed",options,native).equipment)
+outfit.start_equipment_loads()
 assert(next(cache))
 assert(not outfit.run("asset_equipment_abort",{},native).pending)
+outfit.start_equipment_loads()
 assert(not next(cache))
+
+fail_path=mdf
+assert(outfit.run("asset_removed",options,native).equipment)
+start_all()
+local started,load_error=pcall(outfit.run,"asset_factories_ready",{},native)
+assert(not started and tostring(load_error):find(mdf,1,true) and not next(cache))
+fail_path=nil
 
 -- An actor built from the title-screen mesh can only enter the live batch
 -- after its physics subtree has been inspected.
@@ -196,11 +221,13 @@ package.loaded["MHRS_HotReload.village_equipment"]={
 source="Second";options.expected_materials[mdf]={"Second"}
 local receipt=outfit.run("asset_removed",options,native)
 assert(receipt.equipment_bindings==0 and #receipt.deferred_equipment==2)
+start_all()
 local result=outfit.run("asset_factories_ready",{},native)
 assert(not result.pending and not result.source_mismatch and visible_mesh:read_qword(0x10)~=cache[mesh].id)
 observable=true
 local chain_free=outfit.run("asset_removed",options,native)
 assert(chain_free.equipment_bindings==1 and not chain_free.deferred_equipment)
+start_all()
 assert(outfit.run("asset_factories_ready",{},native).pending)
 has_chain=true
 local safe,why=pcall(outfit.run,"asset_factories_ready",{},native)
@@ -209,8 +236,28 @@ assert(not outfit.run("asset_equipment_abort",{},native).pending)
 exists,has_chain=true,true
 local natural=outfit.run("asset_removed",options,native)
 assert(natural.equipment_bindings==1 and not natural.deferred_equipment)
+start_all()
 assert(outfit.run("asset_factories_ready",{},native).pending)
 assert(not outfit.run("asset_factories_ready",{},native).pending and rebuilds==2)
 outfit.reset(native)
+
+-- Scan large scenes in multiple updates without mutating the resource cache.
+local current_scene={call=function() return {renderer,renderer} end}
+sdk.call_native_func=function() return current_scene end
+local get=renderer.call
+renderer.call=function(self,key)
+    if key=="get_MaterialReady" then clock=clock+.004 end
+    return get(self,key)
+end
+local scan=assert(outfit.begin_texture_scan({paths={tex}}))
+assert(not outfit.advance_texture_scan(scan) and scan.cursor==2)
+assert(outfit.advance_texture_scan(scan))
+scan=assert(outfit.begin_texture_scan({paths={tex}}))
+assert(not outfit.advance_texture_scan(scan))
+current_scene={}
+local ok,reason=pcall(outfit.advance_texture_scan,scan)
+assert(not ok and tostring(reason):find("Scene changed",1,true))
+
+os.clock=original_clock
 for _,path in pairs(tmp) do os.remove(path) end
 print("Platform texture ordering, idle first use, replacement, removal, reset and source rejection passed")

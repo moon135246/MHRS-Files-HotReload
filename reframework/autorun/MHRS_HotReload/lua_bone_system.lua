@@ -164,8 +164,13 @@ local function apply(o, previous, head)
     end
     for index, slots in pairs(o.parts) do
         for _, obj in pairs(slots) do
-            local ok, name = pcall(function() return obj:get_Name() end)
-            if ok and type(name) == "string" and changed[name:lower()] then
+            local ok, name = pcall(function()
+                if obj:call("get_Valid") then return obj:get_Name() end
+            end)
+            if not ok or type(name) ~= "string" then
+                -- A worn part can have been replaced since the last animation update.
+                affected[index] = true
+            elseif changed[name:lower()] then
                 affected[index], aliases[name] = true, name:lower()
             end
         end

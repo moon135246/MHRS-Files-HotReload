@@ -1,6 +1,7 @@
 -- Select the local hunter's normal or complete-first-natives-equipment shadow.
 -- Retire/reload the resource before passing the new MeshResource to bind().
 local M = {}
+local retain_holder = require("MHRS_HotReload.retained_holder")
 local slots={"body","arm","wst","leg","helm"}
 
 local function scope(player, transform, sex, variants)
@@ -120,10 +121,9 @@ function M.bind(tx,resource)
     if not before or before==0 then return nil,"The current shadow mesh has no resource" end
     tx.api="pin current and new shadow mesh"
     local old=sdk.to_resource(sdk.to_ptr(before))
-    -- REFramework's global holders pin their managed wrappers across frames.
-    local original=old and old:create_holder_global("via.render.MeshResourceHolder")
-    local next_holder=resource and resource:create_holder_global("via.render.MeshResourceHolder")
-    if not original or not next_holder or original:read_qword(0x10)~=before then
+    local original=old and retain_holder(old,"via.render.MeshResourceHolder",before,previous)
+    local next_holder=resource and retain_holder(resource,"via.render.MeshResourceHolder",resource:get_address())
+    if not original or not next_holder then
         return nil,"Could not acquire both shadow mesh holders"
     end
     local path=next_holder:call("get_ResourcePath"):lower():gsub("^@","")

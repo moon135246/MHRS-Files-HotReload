@@ -15,6 +15,19 @@ class Stop(Exception):
 
 
 class WaitingWornTest(unittest.TestCase):
+    def test_texture_edits_can_share_a_live_mdf_not_indexed_on_disk(self):
+        root = Path("natives/stm")
+        albedo = root / "armor/albedo.tex.28"
+        emissive = root / "streaming/armor/emissive.tex.28"
+        unrelated = root / "armor/mask.tex.28"
+        links = [
+            {"owner": "Armor/Active.mdf2", "child": "Armor/albedo.tex"},
+            {"owner": "armor/active.mdf2", "child": "armor/emissive.tex"},
+            {"owner": "armor/other.mdf2", "child": "armor/mask.tex"},
+        ]
+        related = watch_outfit.files_sharing_material(root, {albedo, emissive, unrelated}, links)
+        self.assertCountEqual(related, [{albedo, emissive}, {unrelated}])
+
     def test_only_missing_named_mmtr_dependencies_are_parked(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -33,6 +46,158 @@ class WaitingWornTest(unittest.TestCase):
             result = watch_outfit.missing_material_dependencies(root, rows, Mock(read=read), validator)
             self.assertEqual(result, {(root / "armor.mdf2.23", root / "absent.mmtr.220427553"),
                                       (root / "armor.mdf2.23", root / "absent.tex.28")})
+
+    def test_palette_removal_waits_before_retiring_the_still_installed_mdf(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as st:
+            game = Path(tmp)
+            root = game / "natives/stm"
+            folder = root / "player/mod/f/pl888"
+            folder.mkdir(parents=True)
+            (game / "reframework/data/MHRS-Files-HotReload").mkdir(parents=True)
+            mdf = folder / "f_arm888.mdf2.23"
+            mesh = folder / "f_arm888.mesh.2109148288"
+            tex = folder / "color.tex.28"
+            color = watch_outfit.logical_path(root, tex)
+            mdf.write_bytes(color.encode("utf-16-le"))
+            mesh.write_bytes(b"same mesh")
+            tex.write_bytes(b"previous color")
+            clock, sent = [0.], []
+
+            def snapshots(*args, **kwargs):
+                original = {f: (signature(f), 0) for f in (mdf, mesh, tex)}
+                wait = yield original
+                tex.unlink()
+                mesh.unlink()
+                mesh.write_bytes(b"same mesh")
+                current = {mdf: original[mdf], mesh: (signature(mesh), 1)}
+                for _ in range(5):
+                    clock[0] += wait + .02
+                    wait = yield current
+                self.assertEqual(sent, [], "Retired a live MDF while its palette was missing")
+                tex.write_bytes(b"next color")
+                current = {**current, tex: (signature(tex), 2)}
+                for _ in range(5):
+                    clock[0] += wait + .02
+                    wait = yield current
+                raise Stop
+
+            def command(channel, action, **opts):
+                if action == "asset_removed":
+                    sent.append((opts["live_reentry"], opts["platform_files"], tex.read_bytes()))
+                    return {"results": [{"path": p, "state": "retired"} for p in opts["paths"]]}
+                return {}
+
+            st.enter_context(patch.object(watch_outfit, "snapshots", snapshots))
+            st.enter_context(patch.object(watch_outfit, "command", command))
+            st.enter_context(patch.object(watch_outfit.time, "monotonic", lambda: clock[0]))
+            messages = st.enter_context(redirect_stdout(io.StringIO()))
+            with self.assertRaises(Stop):
+                watch_outfit.watch(game)
+            self.assertEqual(sent, [([color], [color, watch_outfit.logical_path(root, mdf)], b"next color")],
+                             messages.getvalue())
+            self.assertEqual(messages.getvalue().count("Missing material dependency"), 1)
+
+    def test_new_palette_copy_cancels_inflight_readiness_before_commit(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as st:
+            game = Path(tmp)
+            root = game / "natives/stm"
+            folder = root / "player/mod/f/pl888"
+            folder.mkdir(parents=True)
+            (game / "reframework/data/MHRS-Files-HotReload").mkdir(parents=True)
+            tex = folder / "color.tex.28"
+            tex.write_bytes(b"initial")
+            current = {tex: (signature(tex), 0)}
+            clock, started, commits = [0.], [], []
+            aborted = False
+
+            def install(data):
+                tex.write_bytes(data)
+                return {tex: (signature(tex), current[tex][1] + 1)}
+
+            def snapshots(*args, **kwargs):
+                nonlocal current
+                wait = yield current
+                current = install(b"intermediate")
+                for _ in range(12):
+                    clock[0] += wait + .02
+                    wait = yield current
+                raise Stop
+
+            def command(channel, action, **opts):
+                nonlocal current, aborted
+                if action == "asset_removed":
+                    started.append(tex.read_bytes())
+                    return {"results": [{"path": p, "state": "retired"} for p in opts["paths"]],
+                            "equipment": True}
+                if action == "asset_factories_ready":
+                    if len(started) == 1 and not aborted:
+                        self.assertEqual(tex.read_bytes(), b"intermediate")
+                        current = install(b"latest")
+                        return {"pending": True}
+                    commits.append(started[-1])
+                    return {"pending": False}
+                if action == "asset_equipment_abort":
+                    aborted = True
+                return {}
+
+            st.enter_context(patch.object(watch_outfit, "snapshots", snapshots))
+            st.enter_context(patch.object(watch_outfit, "command", command))
+            st.enter_context(patch.object(watch_outfit.time, "monotonic", lambda: clock[0]))
+            messages = st.enter_context(redirect_stdout(io.StringIO()))
+            with self.assertRaises(Stop):
+                watch_outfit.watch(game)
+            self.assertTrue(aborted, messages.getvalue())
+            self.assertEqual(started, [b"intermediate", b"latest"])
+            self.assertEqual(commits, [b"latest"])
+
+    def test_ready_palette_is_not_held_by_missing_sibling_from_same_copy(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as st:
+            game = Path(tmp)
+            root = game / "natives/stm"
+            folder = root / "player/mod/f/pl888"
+            folder.mkdir(parents=True)
+            (game / "reframework/data/MHRS-Files-HotReload").mkdir(parents=True)
+            mdf = folder / "f_arm888.mdf2.23"
+            first, second = [folder / (name + ".tex.28") for name in ("first", "second")]
+            companion = root / "Streaming" / first.relative_to(root)
+            companion.parent.mkdir(parents=True)
+            first_key, second_key, stream_key = (watch_outfit.logical_path(root, f).lower() for f in (first, second, companion))
+            mdf.write_bytes((first_key + "\0" + second_key).encode("utf-16-le"))
+            for file in (first, second, companion):
+                file.write_bytes(b"initial texture")
+            clock, submitted = [0.], []
+
+            def snapshots(*args, **kwargs):
+                current = {f: (signature(f), 0) for f in (mdf, first, second, companion)}
+                wait = yield current
+                first.unlink()
+                second.write_bytes(b"new available texture")
+                companion.write_bytes(b"new mips for the missing texture")
+                current = {mdf: current[mdf], second: (signature(second), 1), companion: (signature(companion), 1)}
+                for _ in range(8):
+                    clock[0] += wait + .02
+                    wait = yield current
+                self.assertEqual(submitted, [{second_key}])
+                first.write_bytes(b"replacement for the missing texture")
+                current = {**current, first: (signature(first), 2)}
+                for _ in range(8):
+                    clock[0] += wait + .02
+                    wait = yield current
+                raise Stop
+
+            def command(channel, action, **opts):
+                if action == "asset_removed":
+                    submitted.append(set(opts["live_reentry"]))
+                    return {"results": [{"path": p, "state": "retired"} for p in opts["paths"]]}
+                return {}
+
+            st.enter_context(patch.object(watch_outfit, "snapshots", snapshots))
+            st.enter_context(patch.object(watch_outfit, "command", command))
+            st.enter_context(patch.object(watch_outfit.time, "monotonic", lambda: clock[0]))
+            st.enter_context(redirect_stdout(io.StringIO()))
+            with self.assertRaises(Stop):
+                watch_outfit.watch(game)
+            self.assertEqual(submitted, [{second_key}, {first_key, stream_key}])
 
     def test_simultaneously_saved_components_retry_separately(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as st:
@@ -193,7 +358,7 @@ class WaitingWornTest(unittest.TestCase):
             self.assertEqual(sum(was_ready for was_ready, _ in polls), 1, messages.getvalue())
             return applied,key
 
-    def test_compound_vertex_proof_keeps_peers_and_single_local_mesh_only(self):
+    def test_mesh_only_batch_proves_each_peer_and_local_mesh(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as st:
             game = Path(tmp)
             root = game / "natives/stm"
@@ -238,8 +403,9 @@ class WaitingWornTest(unittest.TestCase):
             with self.assertRaises(Stop):
                 watch_outfit.watch(game)
             remaining = set(keys.values()) - {keys[leg]}
-            self.assertEqual(proofs, [(set(keys.values()), {peer}, set()), ({keys[leg]}, {keys[leg]}, {keys[leg]}),
-                                      (remaining, {peer}, remaining)])
+            all_paths = set(keys.values())
+            self.assertEqual(proofs, [(all_paths, all_paths, set()), ({keys[leg]}, {keys[leg]}, {keys[leg]}),
+                                      (remaining, remaining, remaining)])
 
     def test_menu_copies_apply_once_using_final_disk_generation(self):
         for uninstall in (False, True):

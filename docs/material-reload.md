@@ -2,7 +2,7 @@
 
 ## 构建玩家安装包
 
-构建单 DLL 玩家包需要 Windows x64、Python 3.12、Git 和 Visual Studio C++ x64 工具链。运行 `python tools/build_player_package.py dist/MHRS-Files-HotReload-v1.1.0.zip`。构建脚本取用固定版本的静态 CPython SDK 和 REFramework 的 Lua 源码，将监听器、脚本及资源索引一并链接进 DLL。下文的 Python 命令供源码开发与历史用例复测，手动监听和玩家 DLL 应分别运行。
+构建单 DLL 玩家包需要 Windows x64、Python 3.12、Git 和 Visual Studio C++ x64 工具链。运行 `python tools/build_player_package.py dist/MHRS-Files-HotReload-v1.2.0.zip`。构建脚本取用固定版本的静态 CPython SDK 和 REFramework 的 Lua 源码，将监听器、脚本及资源索引一并链接进 DLL。下文的 Python 命令供源码开发与历史用例复测，手动监听和玩家 DLL 应分别运行。
 
 首次构建会将依赖缓存到 `native/build`。本地已有对应版本时，传入 `--python-sdk <已解压的SDK目录> --reframework-source <REFramework检出目录> --zstd-source <Zstandard 1.5.7源码目录>` 可离线构建。`--verify` 在独立宿主验证单 DLL 的启动、文件变更、PAK 回退与退出，`--verify-texture <TEX文件>` 可加入真实纹理样本。使用独立进程从源码读取 PAK 需要安装 `zstandard`，`--external-watcher` 构建这一对照版本另需 PyInstaller 6。
 

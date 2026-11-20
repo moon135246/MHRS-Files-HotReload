@@ -5,7 +5,7 @@ re={on_application_entry=function() end,on_script_reset=function() end}
 json={dump_file=function() end}
 local names={[1]="original.tex",[2]="other.tex",[3]="original.tex"}
 local function holder(ptr)
-    return {read_qword=function() return ptr end,call=function(_,key)
+    return {read_qword=function() return ptr end,add_ref=function() end,get_address=function(h) return h end,call=function(_,key)
         assert(key=="get_ResourcePath");return names[ptr]
     end}
 end
@@ -13,7 +13,7 @@ sdk={hook=function() end,find_type_definition=function()
         return {get_method=function() end,get_methods=function() return {} end}
     end,
     to_ptr=function(ptr) return ptr end,to_resource=function(ptr)
-        return {create_holder_global=function() return holder(ptr) end}
+        return {create_holder=function() return holder(ptr) end}
     end}
 Vector4f={new=function(x,y,z,w) return {x=x,y=y,z=z,w=w} end}
 local function upvalue(fn,name)

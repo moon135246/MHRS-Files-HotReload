@@ -4,6 +4,8 @@ local M = {}
 local array_elements = require("MHRS_HotReload.array_elements")
 local roster = require("MHRS_HotReload.hunter_roster")
 local shadow_skeleton = require("MHRS_HotReload.shadow_skeleton")
+local game_update = require("MHRS_HotReload.game_update")
+local retain_holder = require("MHRS_HotReload.retained_holder")
 local extensions = {"mesh", "mdf2"}
 local recovering = {}
 local stopping = false
@@ -34,8 +36,8 @@ function M.remember_stock(batch,actors,resources,instance)
                     local res=resources[name]
                     if h and h:call("get_ResourcePath"):lower()==path and address(h)==res:get_address()
                             and comp:call("get_MeshReady") and comp:call("get_MaterialReady") then
-                        local pin=res:create_holder_global("via.render.MeshResourceHolder")
-                        if address(pin)==address(h) then
+                        local pin=retain_holder(res,"via.render.MeshResourceHolder",res:get_address(),h)
+                        if pin then
                             instance(comp:get_address(),go).stock={path=path,holder=pin,comp=comp,slot=slot,
                                 root=owner.root,scope=owner.scope}
                             count=count+1
@@ -193,8 +195,10 @@ end
 local function restore(row, restore_when_ready)
     for _, ext in ipairs(extensions) do
         local slot = row[ext]
-        assert(address(slot.old) == slot.original, "Rollback holder changed: " .. slot.path)
-        if current(row, ext) ~= slot.original then row.comp:call(slot.kind[4], slot.old) end
+        if current(row, ext) ~= slot.original then
+            assert(address(slot.old) == slot.original, "Rollback holder changed: " .. slot.path)
+            row.comp:call(slot.kind[4], slot.old)
+        end
     end
     assert(current(row, "mesh") == row.mesh.original and current(row, "mdf2") == row.mdf2.original,
         "Could not restore equipment holders")
@@ -238,7 +242,7 @@ function M.update_recoveries()
 end
 
 if re then
-    re.on_application_entry("UpdateBehavior",M.update_recoveries)
+    game_update.register(M.update_recoveries)
     re.on_script_reset(function()
         stopping=true
         for batch in pairs(recovering) do
@@ -328,17 +332,16 @@ local function stage(batch, components, resources, material_state)
                 and current(row, "mesh") == row.mesh.original and current(row, "mdf2") == row.mdf2.original then
             for _, ext in ipairs(extensions) do
                 local slot = row[ext]
-                -- getMesh()/get_Material() can expose the component's mutable
-                -- holder. A separately allocated holder takes its own strong
-                -- resource reference and survives replacing that component.
-                local current_holder = comp:call(slot.kind[3])
-                local old_resource = assert(sdk.to_resource(sdk.to_ptr(slot.original)))
-                slot.old = assert(old_resource:create_holder_global(slot.kind[2] .. "Holder"))
-                assert(slot.old:get_address() ~= current_holder:get_address() and address(slot.old) == slot.original,
-                    "Could not pin current equipment resource: " .. slot.path)
                 if slot.keep then
-                    slot.holder,slot.fresh=slot.old,slot.original
+                    slot.fresh=slot.original
                 else
+                    -- This getter can expose the component's mutable holder.
+                    -- Keep a separate reference to restore the old generation.
+                    local current_holder = comp:call(slot.kind[3])
+                    local old_resource = assert(sdk.to_resource(sdk.to_ptr(slot.original)))
+                    local kind = slot.kind[2] .. "Holder"
+                    slot.old = assert(retain_holder(old_resource,kind,slot.original,current_holder),
+                        "Could not pin current equipment resource: " .. slot.path)
                     local resource = assert(resources[slot.path], "Missing equipment resource: " .. slot.path)
                     slot.fresh = resource:get_address()
                     if not holders[slot.path] then
@@ -346,11 +349,12 @@ local function stage(batch, components, resources, material_state)
                         local actual = canonical:get_address()
                         canonical:release()
                         assert(actual == slot.fresh, "Equipment resource changed: " .. slot.path)
-                        holders[slot.path] = resource:create_holder_global(slot.kind[2] .. "Holder")
+                        holders[slot.path] = assert(retain_holder(resource,kind,slot.fresh),
+                            "Incorrect equipment holder: " .. slot.path)
                     end
                     slot.holder = holders[slot.path]
+                    assert(address(slot.holder) == slot.fresh, "Incorrect equipment holder: " .. slot.path)
                 end
-                assert(address(slot.holder) == slot.fresh, "Incorrect equipment holder: " .. slot.path)
             end
             if row.vertex_owner then
                 local ok,matches=pcall(same_joints,row)
@@ -452,14 +456,14 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
         elseif batch.chains and batch.chains.current_path then action=action.." "..batch.chains.current_path end
         return debug.traceback(action..": "..tostring(err),2)
     end
-    local ok, pending = xpcall(function()
+    local ok, pending, next_update = xpcall(function()
         if batch.chains and not batch.chains_paused then
             batch.action="stage CHAIN"
             batch.chains:stage(resources)
             batch.chains_paused=true
             batch.action="pause CHAIN"
             batch.chains:pause()
-            return true
+            return true,true
         end
         if batch.shadow then
             if not batch.shadow_bound then
@@ -467,7 +471,7 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
                 batch.shadow_bound=true
                 assert(shadow_skeleton.bind(batch.shadow,resources[batch.shadow.request]))
                 batch.shadow_deadline=os.clock()+3
-                return true
+                return true,true
             end
             if not batch.shadow_ready then
                 batch.action="verify shadow"
@@ -490,12 +494,14 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
                     batch.village=batch.vertex_fallback and batch.vertex_fallback()
                     assert(batch.village,"[live equipment rejected] Worn mesh joint layout could not be confirmed")
                     batch.candidates={}
-                    return true
+                    return true,true
                 end
             end
+            local prepared={}
+            for _,row in ipairs(staged) do prepared[row]=true end
             for _,row in pairs(batch.candidates) do
                 if row.vertex_owner then
-                    assert(#staged==1 and staged[1]==row,"Worn part changed before its renderer update")
+                    assert(prepared[row],"Worn part changed before its renderer update")
                 end
             end
             if batch.physics then batch.physics:stage(resources) end
@@ -509,7 +515,8 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
             end
             batch.deadline = os.clock() + 4
             local changed=batch.physics and batch.physics:bind()
-            return #staged>0 or changed==true or batch.chains~=nil
+            local pending=#staged>0 or changed==true or batch.chains~=nil
+            return pending,pending
         end
         for _, row in ipairs(batch.touched) do
             local ready, reason = verify(row)
@@ -530,14 +537,14 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
                 batch.action="bind CHAIN"
                 batch.chains:bind()
                 batch.chain_bound=true
-                return true
+                return true,true
             end
             if not batch.chain_resumed then
                 batch.action="resume CHAIN"
                 batch.chains:resume()
                 batch.chain_resumed=true
                 batch.chain_deadline=os.clock()+4
-                return true
+                return true,true
             end
             batch.action="verify CHAIN"
             local ready, reason=batch.chains:verify()
@@ -561,7 +568,7 @@ function M.advance(batch, scene_components, resources, material_state, restore_w
         if recovering[batch] then batch.abort_reason=reason;return true end
         error(reason)
     end
-    return pending
+    return pending,next_update
 end
 
 return M

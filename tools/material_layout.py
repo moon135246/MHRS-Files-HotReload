@@ -84,15 +84,27 @@ def materials(raw):
         size, properties, textures = struct.unpack_from("<III", raw, h + 12)
         props, slots = struct.unpack_from("<QQ", raw, h + 40)
         block, = struct.unpack_from("<Q", raw, h + 64)
-        table(block, size, 1, low, len(raw))
+        if (size or properties) and not low <= block <= len(raw):
+            raise ValueError("Material table outside file")
+        available = len(raw) - block
+        last_value_end = 0
         parameters, values = set(), {}
         for p in table(props, properties, 24, low, len(raw)):
             offset, floats = struct.unpack_from("<II", raw, p + 16)
-            if floats == 0 or offset + floats * 4 > size:
+            width = floats * 4
+            end = offset + width
+            if not width or end > size:
                 raise ValueError("Invalid MDF parameter range")
+            if end > available:
+                raise ValueError("MDF parameter data outside file")
+            last_value_end = max(last_value_end, end)
             name = wide(p)
-            parameters.add((name, offset, floats * 4))
-            values[name] = raw[block + offset:block + offset + floats * 4]
+            parameters.add((name, offset, width))
+            values[name] = raw[block + offset:block + end]
+        # The declared shader buffer includes 16-byte alignment. The final
+        # block can end at its last stored value, without writing the padding.
+        if size and size > available and size != ((last_value_end + 15) & ~15):
+            raise ValueError("Material table outside file")
         paths = {wide(t): wide(t + 16) if struct.unpack_from("<Q", raw, t + 16)[0] else ""
                  for t in table(slots, textures, 32, low, len(raw))}
         template = wide(h + 72).replace("\\", "/")

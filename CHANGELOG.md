@@ -4,6 +4,7 @@
 
 | 版本 | 本版更新 |
 | --- | --- |
+| [1.2.0](https://github.com/moon135246/MHRS-Files-HotReload/releases/tag/v1.2.0) | 缩短换色和整套换装的等待，分帧创建装备资源。修复连续切换时旧贴图残留，以及部分 MDF2 导致只更新骨架的问题。 |
 | [1.1.0](https://github.com/moon135246/MHRS-Files-HotReload/releases/tag/v1.1.0) | 单件与整套防具按当前挂点刷新，贴图、模板就绪后分组更新。 |
 | [1.0.9](https://github.com/moon135246/MHRS-Files-HotReload/releases/tag/v1.0.9) | 修复开场演出结束后仍无法换装的问题，换场后重新匹配装备。 |
 | [1.0.8](https://github.com/moon135246/MHRS-Files-HotReload/releases/tag/v1.0.8) | 记录缺失的 MMTR 路径，补装模板后继续换装。 |

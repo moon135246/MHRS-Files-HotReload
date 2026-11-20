@@ -41,7 +41,17 @@ local function joint(name,rest)
 end
 local function player(index,part,rest,sex)
     local arm,leg=joint("L_Arm_01",rest or 1),joint("L_Leg_01",1)
-    local partgo={get_Name=function() return part end, call=function(_,n) assert(n=="get_Name");return part end}
+    local partgo={valid=true,reads=0}
+    function partgo:get_Name()
+        self.reads=self.reads+1
+        assert(self.valid,"Read a destroyed part")
+        return part
+    end
+    function partgo:call(n)
+        if n=="get_Valid" then return self.valid end
+        assert(n=="get_Name")
+        return self:get_Name()
+    end
     local child={call=function(_,n)
         if n=="get_GameObject" then return partgo end
         assert(n=="get_Next")
@@ -64,7 +74,7 @@ local function player(index,part,rest,sex)
         if t=="via.render.Mesh" then return mesh end
         assert(n=="getComponent(System.Type)"); return ik
     end}
-    return {arm=arm, leg=leg, ik=ik,go=go,shadow=shadow, get_type_definition=function() return {is_a=function() return false end} end,
+    return {arm=arm, leg=leg, ik=ik,go=go,shadow=shadow,part=partgo, get_type_definition=function() return {is_a=function() return false end} end,
         get_field=function(_,n) if n=="mSex" then return sex or 1 end;assert(n=="_playerWeaponType");return 1 end,
         call=function(_,n)
             if n=="get_GameObject" then return go end
@@ -158,4 +168,12 @@ c.arm.rest=1.25;c.shadow.id=2
 sample(23,{[other]=0.5,[c]=1.75,[a]=1.875})
 c.arm.rest=1.375;bridge.rest_changed(c.go)
 sample(24,{[other]=0.5,[c]=1.75,[a]=1.875})
+-- A rig can be replaced before the next animation update sees the new part.
+local replaced=player(2,"f_helm602",1.5)
+c.part.valid=false
+local reads_before_removal=c.part.reads
+players={other,replaced,a}
+manifest("7",{f_arm507="c",m_leg610="male"},{c=profile(0.875),male=profile(-0.5)})
+sample(25,{[other]=0.5,[replaced]=1,[a]=1.875})
+assert(c.part.reads==reads_before_removal,"Profile removal read a destroyed part")
 print("PASS unmodified "..phase..": distinct same-sex rests and JSONs, recycled quest slot, startup, swap, removal, sparse joints, IK, UI and state reset")

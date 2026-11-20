@@ -46,12 +46,24 @@ class EquipmentSourcesTest(unittest.TestCase):
         f.write_bytes(data)
         return f
 
-    def prepare(self, sources, files, current, affected):
+    def prepare(self, sources, files, current, affected, **options):
         paths = {f: logical_path(self.root, f).lower() for f in files}
         targets = set(paths.values())
         targets.update(p.removeprefix("streaming/") for p in paths.values())
         known = {logical_path(self.root, f): f for f in current}
-        return sources.prepare(paths, current, affected | targets, targets, self.links, self.previous, {}, known)
+        return sources.prepare(paths, current, affected | targets, targets, self.links, self.previous, {}, known, **options)
+
+    def test_texture_overwrite_keeps_unchanged_sibling_generations(self):
+        albedo = self.write("player/mod/demo/albedo.tex.28", b"updated")
+        detail = self.write("player/mod/demo/detail.tex.28", b"same")
+        owner = self.write(self.mdf + ".23", b"material")
+        self.links.graph[self.mdf] = {"player/mod/demo/albedo.tex", "player/mod/demo/detail.tex"}
+        sources = EquipmentSources(self.root, self.platform, self.archive, {})
+        current = {albedo: (2, 1), detail: (1, 0), owner: (1, 0)}
+        selected, ready, _ = self.prepare(sources, {albedo}, current, {self.mdf}, texture_edits=True)
+        self.assertEqual(selected, {albedo, owner})
+        self.assertEqual(ready, selected)
+        self.assertFalse(Path(str(detail) + ".stm").exists())
 
     def test_startup_positive_cache_removal_pak_then_reinstall(self):
         file = self.write(self.mdf + ".23", b"boot mod")

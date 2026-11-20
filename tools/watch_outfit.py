@@ -1,5 +1,6 @@
 """Watch loose resources used by equipped parts and active Rise scene components."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 import json
 import os
@@ -13,7 +14,7 @@ if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 from material_layout import IncompatibleMaterial, MaterialValidator, check_layout, materials, mesh_materials, unchanged_bindings
 from file_changes import DirectoryChanges, require_closed_writers, snapshots
-from platform_files import PlatformFiles
+from platform_files import PlatformFiles, read_source_digest
 from rise_pak import RisePak
 from equipment_sources import EquipmentSources
 from peer_mesh import vertex_edit
@@ -35,26 +36,94 @@ SUFFIXES = (".chain.48", ".jcns.21", ".motbank.3", ".motlist.528", ".efx.2818730
 # to wake pending MDFs without publishing our own writes as new texture edits.
 DEPENDENCY_VARIANTS = (".tex.28.stm",)
 WATCHED_SUFFIXES = (*SUFFIXES, *DEPENDENCY_VARIANTS)
+RESOURCE_SETTLE_SECONDS = 0.55
+TEXTURE_EDIT_SETTLE_SECONDS = 0.12
+
+
+def files_sharing_material(root, files, links):
+    textures = {}
+    for file in files:
+        path = logical_path(root, file).lower().removeprefix("streaming/")
+        textures.setdefault(path, set()).add(file)
+    materials = {}
+    for link in links:
+        owner, child = link["owner"].lower(), link["child"].lower()
+        if owner.endswith(".mdf2") and child in textures:
+            materials.setdefault(owner, set()).update(textures[child])
+    return materials.values()
+
+
+def texture_overwrites(files, current, applied):
+    return bool(files) and all(f in applied and f in current and f.name.lower().endswith(".tex.28") for f in files)
+
+
+def appearance_digests(root, files, current):
+    # A manager may recopy every file in the main outfit when a palette is
+    # removed. Compare content before treating those files as a new outfit.
+    candidates = []
+    for file in sorted(files):
+        relative = file.relative_to(root).as_posix().lower().removeprefix("streaming/")
+        if (file in current and relative.startswith("player/mod/") and relative.endswith(
+                (".tex.28", ".mesh.2109148288", ".mdf2.23", ".chain.48", ".user.2", ".jcns.21",
+                 ".fbxskel.4", ".mmtr.220427553"))):
+            candidates.append(file)
+
+    def read(file):
+        try:
+            digest = read_source_digest(file, current[file][0])
+            if digest is not None:
+                return file, digest
+        except OSError:
+            pass  # Let the regular copy checks handle a file still being installed.
+
+    if len(candidates) < 8:
+        return dict(result for result in map(read, candidates) if result is not None)
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="MHRS digests") as workers:
+        return dict(result for result in workers.map(read, candidates) if result is not None)
+
+
+class CopyInProgress(OSError):
+    pass
+
+
+def check_copy_generation(files, snapshot):
+    for file in files:
+        expected = snapshot.get(file)
+        try:
+            actual = signature(file)
+        except FileNotFoundError:
+            actual = None
+        if actual != (expected[0] if expected else None):
+            raise CopyInProgress(f"Copy changed: {file.name}")
 
 
 class MissingMaterialDependencies(TimeoutError):
     def __init__(self, root, dependencies):
         self.files = {file for pair in dependencies for file in pair}
-        templates = {shader for _, shader in dependencies}
-        self.files.update(Path(str(f) + ".stm") for f in templates)
-        label = "Missing MMTR" if all(p.name.lower().endswith(".mmtr.220427553") for p in templates) else "Missing material dependency"
+        self.sources = {file for _, file in dependencies}
+        self.files.update(Path(str(f) + ".stm") for f in self.sources)
+        label = "Missing MMTR" if all(p.name.lower().endswith(".mmtr.220427553") for p in self.sources) else "Missing material dependency"
         super().__init__(label + ": " + ", ".join(sorted(
-            "natives/stm/" + path.relative_to(root).as_posix() for path in templates)))
+            "natives/stm/" + path.relative_to(root).as_posix() for path in self.sources)))
 
     def watch_files(self, batch, current):
         print(str(self), "Waiting for the dependency or outfit files to change.", flush=True)
         return {f: current.get(f) for f in batch | self.files}
 
 
+class MissingLooseTextures(MissingMaterialDependencies):
+    def blocked_files(self, root, edits):
+        # A changed mesh or material still requires its full set of sources.
+        # Existing materials can reuse the resident TEX for a missing file
+        # while replacing another TEX. A header and its streamed mips stay paired.
+        if not all(file.name.lower().endswith(".tex.28") for file in edits):
+            return set()
+        return {file for file in edits
+                if root / file.relative_to(root).as_posix().lower().removeprefix("streaming/") in self.sources}
+
+
 def missing_material_dependencies(root, waiting, archives, validator):
-    # Only park copies for a dependency the engine actually reported waiting on.
-    # Built-in shaders, mounted PAKs and present loose files retain normal readiness retries.
-    missing = set()
+    # The engine can report dependencies not seen in the loose-file graph.
     reported = set()
     for row in waiting.splitlines():
         fields = row.replace("\\", "/").split("\t")
@@ -69,16 +138,34 @@ def missing_material_dependencies(root, waiting, archives, validator):
             continue
         if child.lower() not in validator.packaged_shaders:
             reported.add((root / owner, root / shader))
-    for shader in {shader for _, shader in reported}:
-        variants = (shader, Path(str(shader) + ".stm"))
+    return unavailable_material_dependencies(root, reported, archives, validator)
+
+
+def unavailable_material_dependencies(root, dependencies, archives, validator):
+    missing = set()
+    for file in {file for _, file in dependencies}:
+        variants = (file, Path(str(file) + ".stm"))
         if any(validator.source(f) for f in variants):
             continue
         try:
             if all(archives.read(f.relative_to(root)) is None for f in variants):
-                missing.add(shader)
+                missing.add(file)
         except (OSError, ValueError, RuntimeError):
-            continue  # An unreadable archive cannot establish that a template is missing.
-    return {(owner, shader) for owner, shader in reported if shader in missing}
+            continue  # An unreadable archive cannot establish a missing source.
+    return {(owner, file) for owner, file in dependencies if file in missing}
+
+
+def removed_texture_dependencies(root, paths, current, ready, affected, links):
+    textures = {path: f for f, path in paths.items() if path.endswith(".tex")
+                and not path.startswith("streaming/") and f not in current and f not in ready}
+    if not textures:
+        return set()
+    # A palette uninstall can delete a shared TEX before the next palette is
+    # written. Only the still-installed MDF's incoming graph can prove it
+    # needs that path. Its previous, currently rendered graph may be obsolete.
+    return {(mdf, textures[texture]) for owner in affected if owner.endswith(".mdf2")
+            and (mdf := root / (owner + ".23")) in current
+            for texture in links.graph.get(owner, ()) if texture in textures}
 
 
 class GuiReadyNotice:
@@ -283,11 +370,13 @@ def watch(game, baseline_root=None, schema=None):
         print("Using FirstNatives for equipment loose files", flush=True)
 
     def retire_paths(paths, aliases, live_reentry, missing, expected_materials, platform_files, physics, provenance, shadows, worn_retry,
-                     peer_meshes, stock_meshes, reset_replay=None, worn_guard=None):
+                     peer_meshes, stock_meshes, reset_replay=None, worn_guard=None, verify_copy=None):
         nonlocal sleeping
         paths = sorted(set(paths))
         if not paths:
             return {}, {}, {}, None
+        if verify_copy:
+            verify_copy()
         receipt = equipment_command(channel, "asset_removed", paths=paths, aliases=aliases, live_reentry=live_reentry,
                           missing=missing, expected_materials=expected_materials, platform_files=platform_files,
                           physics=physics, startup_equipment=provenance[0], loose_equipment=provenance[1],
@@ -311,6 +400,12 @@ def watch(game, baseline_root=None, schema=None):
         if receipt.get("factories") or receipt.get("equipment"):
             deadline = time.monotonic() + 12
             while True:
+                if verify_copy:
+                    try:
+                        verify_copy()
+                    except CopyInProgress:
+                        command(channel, "asset_equipment_abort")
+                        raise
                 progress = equipment_command(channel, "asset_factories_ready")
                 worn_mount = progress.get("worn_mount") or worn_mount
                 if progress.get("source_mismatch"):
@@ -522,7 +617,8 @@ def watch(game, baseline_root=None, schema=None):
             result = command(channel, "asset_user", path=path, edits=edits)
             print("Updated USER", path, len(edits), "fields in", result["roots"], "roots", flush=True)
 
-    def apply_batch(changed, current, applied, removed_files, worn_retry=None, reset_replay=None, worn_guard=None):
+    def apply_batch(changed, current, applied, removed_files, worn_retry=None, reset_replay=None, worn_guard=None,
+                    material_links=None, digests=None):
         nonlocal full_wait
         previous_wait = full_wait
         replacing = previous_wait and any(worn_source(logical_path(root, f).lower(), previous_wait["worn"]) for f in changed)
@@ -532,7 +628,13 @@ def watch(game, baseline_root=None, schema=None):
                             for name in (logical_path(root, f).lower() for f in changed))
         if replacing:
             changed = changed | previous_wait["files"]
-        require_closed_writers(f for f in changed if f in current)
+            material_links = None
+        try:
+            require_closed_writers(f for f in changed if f in current)
+        except OSError as error:
+            if getattr(error, "winerror", None) in (32, 33):
+                raise CopyInProgress(str(error)) from error
+            raise
         paths = {f: logical_path(root, f).lower() for f in changed}
         previous = links.index
         disk = {f: (f.read_bytes() if f in current else None) for f in changed if needs_contents(f)}
@@ -540,16 +642,17 @@ def watch(game, baseline_root=None, schema=None):
         targets = set(paths.values())
         # Streamed mips are the companion of the ordinary TEX holder.
         targets.update(p[len("streaming/"):] for p in paths.values() if p.startswith("streaming/") and p.endswith(".tex"))
-        live_graph, live_names, material_links = {}, {}, []
+        live_graph, live_names = {}, {}
         material_sources = sorted(p for p in targets if p.endswith((".mmtr", ".tex")) and not p.startswith("streaming/"))
-        if material_sources:
+        if material_sources and material_links is None:
             reply = command(channel, "asset_material_links", paths=material_sources)
-            material_links = reply.get("links") or []
-            for entry in material_links:
-                owner, child = entry["owner"], entry["child"]
-                live_graph.setdefault(owner.lower(), set()).add(child.lower())
-                for name in (owner, child):
-                    live_names.setdefault(name.lower(), set()).add(name)
+            material_links = reply.get("links")
+        material_links = material_links or []
+        for entry in material_links:
+            owner, child = entry["owner"], entry["child"]
+            live_graph.setdefault(owner.lower(), set()).add(child.lower())
+            for name in (owner, child):
+                live_names.setdefault(name.lower(), set()).add(name)
         affected = consumers(targets, previous, links.index, live_graph, packaged=links.stock_parents,
                              overrides=lambda owner: owner in previous.graph and owner in links.graph)
         sequences = sorted(p for p in affected if p.endswith(".uvs"))
@@ -575,11 +678,16 @@ def watch(game, baseline_root=None, schema=None):
                             mdf = validator.source(root / (owner + ".23"))
                             if mdf:
                                 validator.validate(mdf, mdf_templates.get(root / (owner + ".23")))
-        for file in changed:
-            if (file in current and signature(file) != current[file][0]) or (file not in current and file.exists()):
-                raise OSError(f"Copy in progress: {file.name}")
+        check_copy_generation(changed, current)
+        palette_edit = texture_overwrites(changed, current, applied)
         platform_sources, ready, platform_paths = sources.prepare(
-            paths, current, affected, targets, links, previous, live_graph, physical_paths)
+            paths, current, affected, targets, links, previous, live_graph, physical_paths,
+            texture_edits=palette_edit, digests=digests)
+        required = removed_texture_dependencies(root, paths, current, ready, affected, links)
+        if required:
+            absent = unavailable_material_dependencies(root, required, sources.archives, validator)
+            if absent:
+                raise MissingLooseTextures(root, absent)
         physics = physics_expectations(paths, current, sources.original)
         shadows = shadow_targets(root, changed, current, sources.archives, first_natives)
         changed_meshes = {path: file for file, path in paths.items()
@@ -591,10 +699,10 @@ def watch(game, baseline_root=None, schema=None):
         worn_meshes = command(channel, "asset_peer_meshes", paths=sorted(peer_paths)) if peer_paths else {}
         online_parts = worn_meshes.get("paths") or {}
         vertex_paths = set(online_parts)
-        # Lua can commit a local vertex update only for a single live_reentry
-        # path. A complete outfit uses the game's ordinary equipment assembly.
-        if len(targets) == 1:
-            vertex_paths.update(targets.intersection(worn_meshes.get("master") or {}))
+        # Verify each worn input against stock for a mesh-only edit. Lua
+        # rechecks the active slot, joints and running chain before committing.
+        if targets == changed_meshes.keys():
+            vertex_paths.update(changed_meshes.keys() & (worn_meshes.get("master") or {}))
         # A single edit can also refresh an already running consumer. Mixed
         # additions, overwrites and removals are one factory generation: never
         # apply a new mesh to an old MDF while a costume directory is changing.
@@ -712,7 +820,8 @@ def watch(game, baseline_root=None, schema=None):
                                                  sorted(targets), missing, expected_materials,
                                                  [p for p in platform_paths if p.lower() not in published],
                                                  physics, sources.provenance(affected, current), shadows, worn_retry, peer_meshes,
-                                                 dict.fromkeys(stock_sources, True), reset_replay, worn_guard)
+                                                 dict.fromkeys(stock_sources, True), reset_replay, worn_guard,
+                                                 verify_copy=(lambda: check_copy_generation(changed, current)) if palette_edit else None)
         if replacing:
             full_wait = None
         if mount_outcome:
@@ -790,6 +899,7 @@ def watch(game, baseline_root=None, schema=None):
     physical_paths.update((logical_path(root, file).lower(), file) for file in current
                           if not file.name.lower().endswith(DEPENDENCY_VARIANTS))
     applied = current.copy()
+    applied_appearance = {file: digest.sha256 for file, digest in appearance_digests(root, current, current).items()}
     for file in current:
         if needs_contents(file):
             try:
@@ -803,6 +913,7 @@ def watch(game, baseline_root=None, schema=None):
     retries = {}
     next_awake = 0
     changed = set()
+    texture_burst = False
     material_waits = []
     rejected_groups = {}
     deferred_material_waits = {}
@@ -826,9 +937,15 @@ def watch(game, baseline_root=None, schema=None):
                 f = parents[f]
             return f
 
-        uses = {}
+        uses, texture_folders = {}, {}
+        armor_files = []
         for file in sorted(files):
             name = logical_path(root, file).lower()
+            ordinary = name.removeprefix("streaming/")
+            if ordinary.startswith("player/mod/") and ordinary.endswith(".tex"):
+                texture_folders.setdefault(ordinary.rpartition("/")[0], []).append(file)
+            if re.match(r"^player/mod/[fm]/pl[0-9]+/", name) and name.endswith((".mesh", ".mdf2", ".chain")):
+                armor_files.append(file)
             targets = {name, name.removeprefix("streaming/")}
             owners = consumers(targets, old_index, incoming, packaged=links.stock_parents,
                                overrides=lambda owner: owner in old_index.graph and owner in incoming.graph)
@@ -849,6 +966,15 @@ def watch(game, baseline_root=None, schema=None):
             members = sorted(files.intersection(related))
             for file in members[1:]:
                 parents[leader(file)] = leader(members[0])
+        # Include extra maps shipped beside a known outfit's dependencies in
+        # the same install/removal. They often have no MDF edge of their own.
+        armor_groups = {leader(file) for file in armor_files}
+        for members in texture_folders.values():
+            owners = armor_groups.intersection(leader(file) for file in members)
+            if len(owners) == 1:
+                owner = next(iter(owners))
+                for file in members:
+                    parents[leader(file)] = owner
         groups = {}
         for file in sorted(files):
             groups.setdefault(leader(file), set()).add(file)
@@ -900,7 +1026,11 @@ def watch(game, baseline_root=None, schema=None):
                         wakeups.append(watched.keys())
                     else:
                         changed.difference_update(batch)
-                due = {f: now + .55 if f not in due or current.get(f) != previous.get(f) else due[f] for f in changed}
+                # Existing TEX overwrites can settle early. Additions,
+                # removals and mixed outfits still wait for the whole group.
+                texture_burst = not wakeups and not retries and texture_overwrites(changed, current, applied)
+                settle = TEXTURE_EDIT_SETTLE_SECONDS if texture_burst else RESOURCE_SETTLE_SECONDS
+                due = {f: now + settle if f not in due or current.get(f) != previous.get(f) else due[f] for f in changed}
                 try:
                     groups = groups_for(changed, wakeups)
                 except OSError:
@@ -912,24 +1042,56 @@ def watch(game, baseline_root=None, schema=None):
                 for group in groups:
                     if group not in retries and any(f not in previous or current.get(f) != previous.get(f) for f in group):
                         for f in group:
-                            due[f] = min(due[f], now + .55)
+                            due[f] = min(due[f], now + settle)
                 retries = {group: delay for group, delay in retries.items()
                            if group in groups and all(previous.get(f) == current.get(f) for f in group)}
+                if texture_burst and groups:
+                    common_due = max(due[f] for group in groups for f in group)
+                    for group in groups:
+                        for f in group:
+                            due[f] = common_due
+            burst_links = None
+            if texture_burst and groups and now >= max(due[f] for group in groups for f in group):
+                texture_burst = False
+                if len(groups) > 1:
+                    pending = set().union(*groups)
+                    paths = sorted({logical_path(root, f).lower().removeprefix("streaming/") for f in pending})
+                    try:
+                        burst_links = command(channel, "asset_material_links", paths=paths).get("links") or []
+                        groups = groups_for(pending, files_sharing_material(root, pending, burst_links))
+                    except (OSError, RuntimeError, TimeoutError):
+                        # Let the normal per-group transaction retry a failed scene query.
+                        burst_links = None
             for group in groups.copy():
                 if max(due[f] for f in group) > now:
                     continue
                 old_index, old_records = links.index, links.records
+                settled = None
                 try:
-                    apply_batch(group, current, applied, removed_files)
+                    digests = appearance_digests(root, group, current)
+                    edits = group - {file for file, digest in digests.items() if applied_appearance.get(file) == digest.sha256}
+                    if edits:
+                        apply_batch(edits, current, applied, removed_files, material_links=burst_links, digests=digests)
                 except MissingMaterialDependencies as error:
                     links.index, links.records = old_index, old_records
-                    material_waits = [entry for entry in material_waits if entry[0].isdisjoint(group)]
-                    material_waits.append((group, error.watch_files(group, current)))
+                    waiting = group
+                    if isinstance(error, MissingLooseTextures):
+                        blocked = error.blocked_files(root, edits)
+                        if blocked:
+                            waiting = frozenset(blocked)
+                            settled = group - waiting
+                    material_waits = [entry for entry in material_waits if entry[0].isdisjoint(waiting)]
+                    material_waits.append((waiting, error.watch_files(waiting, current)))
                 except (IncompatibleMaterial, UnicodeError, ValueError, struct.error) as error:
                     links.index, links.records = old_index, old_records
                     print("Rejected copy", str(error), flush=True)
                     rejected_groups = {batch: watched for batch, watched in rejected_groups.items() if batch.isdisjoint(group)}
                     rejected_groups[group] = {f: current.get(f) for f in group}
+                except CopyInProgress:
+                    links.index, links.records = old_index, old_records
+                    for f in group:
+                        due[f] = time.monotonic() + TEXTURE_EDIT_SETTLE_SECONDS
+                    continue
                 except (RuntimeError, TimeoutError, OSError) as error:
                     links.index, links.records = old_index, old_records
                     print("Reload pending", str(error), flush=True)
@@ -944,11 +1106,16 @@ def watch(game, baseline_root=None, schema=None):
                             applied[f] = current[f]
                         else:
                             applied.pop(f, None)
+                        applied_appearance.pop(f, None)
+                    applied_appearance.update((file, digest.sha256) for file, digest in digests.items())
                     material_waits = [entry for entry in material_waits if entry[0].isdisjoint(group)]
                 groups.remove(group)
                 for f in group:
                     due.pop(f, None)
                 retries.pop(group, None)
+                if settled:
+                    groups.append(settled)
+                    due.update(dict.fromkeys(settled, now))
             if deferred and time.monotonic() >= next_awake:
                 try:
                     pending_files = set().union(*groups)

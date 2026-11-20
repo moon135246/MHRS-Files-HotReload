@@ -76,12 +76,17 @@ class EquipmentSources:
         return current[file] == initial or (current[file][0] == initial[0] and stamp is not None
                                             and self.times.read(file) == stamp)
 
-    def prepare(self, paths, current, affected, targets, links, previous, live_graph, physical_paths):
+    def prepare(self, paths, current, affected, targets, links, previous, live_graph, physical_paths,
+                *, texture_edits=False, digests=None):
         armor_mdfs = {p for p in affected if p.startswith("player/mod/") and p.endswith(".mdf2")}
         textures = {texture for mdf in armor_mdfs for graph in (links.graph, previous.graph, live_graph)
                     for texture in graph.get(mdf, ()) if texture.endswith(".tex")}
         textures.update(p for p in targets if p.endswith(".tex")
                         and armor_mdfs.intersection(links.stock_parents.get(p, ())))
+        if texture_edits:
+            # The MDF itself has not changed. Keep the established cache
+            # generations for the textures outside this edit.
+            textures.intersection_update(targets)
         headers = self._stream_headers(paths, current, textures)
         candidates = set(paths) | headers
         for path in affected | textures:
@@ -111,7 +116,7 @@ class EquipmentSources:
         needs_pak = {f for f in selected if f not in current and
                      (f in self.startup or f in headers or f in self.packaged)}
         ready = self._stage_packages(needs_pak)
-        loose = self.platforms.prepare(selected - ready)
+        loose = self.platforms.prepare(selected - ready, digests=digests)
         self.packaged.difference_update(loose)
         ready.update(loose)
         self.stream_headers.update(f for f in headers & ready if f not in paths

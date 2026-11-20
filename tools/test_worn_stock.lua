@@ -20,7 +20,10 @@ local function object(id,parent,name)
     return g
 end
 local function holder(path,id)
-    return {read_qword=function() return id end,call=function(_,k) assert(k=="get_ResourcePath");return path end}
+    local h = {add_ref=function() end,read_qword=function() return id end,
+        call=function(_,k) assert(k=="get_ResourcePath");return path end}
+    function h:get_address() return self end
+    return h
 end
 local owner={role="master",scope="village/5",index=0,root=object(80),slots={}}
 local actors={entries={owner},parts={},scope=owner.scope}
@@ -46,7 +49,7 @@ for i,part_name in ipairs({"body","arm","waist","leg","helm"}) do
     tx.parts[slot]={touched=true,name=name,mesh=path,mesh_name=path}
     owner.slots[slot]=go
     actors.parts[go:get_address()]={entry=owner,go=go,slot=slot}
-    resources[path]={get_address=function() return 300+i end,create_holder_global=function() return holder(path,300+i) end}
+    resources[path]={get_address=function() return 300+i end,create_holder=function() return holder(path,300+i) end}
     batch.stock_meshes[path]=true
     batch.platform[path]=true
     peer.generation(path,300+i,nil) -- this was a full outfit, not a vertex-only request

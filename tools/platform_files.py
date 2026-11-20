@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+from typing import NamedTuple
 import uuid
 
 from file_changes import FileChangeTimes
@@ -85,10 +86,30 @@ def _stamp(stream):
 
 def _digest(stream):
     stream.seek(0)
-    digest = hashlib.sha256()
-    while block := stream.read(1024 * 1024):
-        digest.update(block)
-    return digest.hexdigest()
+    return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+class SourceDigest(NamedTuple):
+    sha256: str
+    identity: tuple[int, int]
+    stamp: tuple[int, int, int] | None
+
+    def matches(self, stream, identity):
+        if self.stamp is None or self.identity != tuple(identity):
+            return False
+        stamp = _stamp(stream)
+        return stamp is not None and self.stamp == tuple(stamp)
+
+
+def read_source_digest(path, signature):
+    # Hash while denying writers. Use the same file ID and Windows ChangeTime
+    # when staging the alias, including if a save restores the old mtime.
+    with _publication_source(path, path) as stream:
+        info = os.fstat(stream.fileno())
+        if (info.st_ino, info.st_size, info.st_mtime_ns) != signature:
+            return None
+        stamp = _stamp(stream)
+        return SourceDigest(_digest(stream), (info.st_dev, info.st_ino), tuple(stamp) if stamp else None)
 
 
 def _dispose(stream, path):
@@ -102,7 +123,7 @@ def _dispose(stream, path):
             raise _winerror(path)
 
 
-def _remove_if_owned(path, owner, source):
+def _remove_if_owned(path, owner):
     if not owner:
         return
     try:
@@ -115,11 +136,7 @@ def _remove_if_owned(path, owner, source):
         with _reader(path, can_delete=True) as stream:
             if _identity(stream) != owner["id"]:
                 return
-            try:
-                same_source = owner["linked"] and os.path.samestat(os.fstat(stream.fileno()), source.stat())
-            except FileNotFoundError:
-                same_source = False
-            if not same_source and _digest(stream) != owner["sha256"]:
+            if not owner["linked"] and _digest(stream) != owner["sha256"]:
                 return
             _dispose(stream, path)
     except FileNotFoundError:
@@ -202,12 +219,12 @@ class PlatformFiles:
         if self._journal(record["source"]) != journal:
             raise ValueError(f"Invalid platform ownership journal: {journal}")
         target = Path(str(source) + ".stm")
-        _remove_if_owned(target, record.get("owner"), source)
+        _remove_if_owned(target, record.get("owner"))
         if record.get("next"):
             # rename() consumes the staged entry. If it is still there,
             # publication did not happen and an existing target is foreign.
             if not (self._scratch(source, record) / "payload").exists():
-                _remove_if_owned(target, record["next"], source)
+                _remove_if_owned(target, record["next"])
         self._clean_stage(source, record)
         journal.unlink()
 
@@ -221,7 +238,7 @@ class PlatformFiles:
         if errors:
             raise OSError("Platform-file recovery failed: " + " / ".join(errors))
 
-    def _prepare(self, ordinary, package=None, *, detached=False, transfer_package=False):
+    def _prepare(self, ordinary, package=None, *, detached=False, transfer_package=False, checked=None):
         key = ordinary.relative_to(self.root).as_posix()
         ordinary = self._source(key)
         target = Path(str(ordinary) + ".stm")
@@ -241,39 +258,38 @@ class PlatformFiles:
         owner = record.get("owner")
         with _publication_source(source, ordinary) as protected:
             source_id = _identity(protected)
+            digest = checked.sha256 if checked and checked.matches(protected, source_id) else None
             if not detached and owner and owner["linked"] and owner["id"] == source_id:
                 try:
                     with _reader(target) as side:
                         if _identity(side) == source_id:
                             stamp = _stamp(protected)
                             if stamp is None or stamp != owner.get("stamp"):
-                                owner["sha256"] = _digest(protected)
+                                owner["sha256"] = digest or _digest(protected)
                                 owner["stamp"] = stamp
                                 self._save(journal, record)
                             return True
                 except FileNotFoundError:
                     pass
-            digest = _digest(protected)
+            digest = digest or _digest(protected)
             try:
                 with _reader(target) as stream:
                     target_id = _identity(stream)
-                    target_digest = digest if source_id == target_id else _digest(stream)
-                    same_content = digest == target_digest
-                    owned = owner is not None and target_id == owner["id"]
-                    if owned and not (owner["linked"] and target_id == source_id):
-                        owned = target_digest == owner["sha256"]
-                    if not owned:
-                        if journal.exists():
-                            journal.unlink()
-                        if not same_content:
-                            raise PlatformFileConflict(f"Existing user platform file differs from {source}: {target}")
-                        return True
-                    if (same_content and bool(owner.get("packaged")) == packaged
-                            and (not owner["linked"] or (not detached and source_id == target_id))):
-                        if digest != owner["sha256"]:
-                            owner["sha256"] = digest
-                            self._save(journal, record)
-                        return True
+                    # Writes to the ordinary file also change the bytes of our
+                    # hard link. If the installer then replaces the ordinary
+                    # name, the recorded ID still identifies our old entry.
+                    # A detached copy can only change through another writer.
+                    if not (owner and owner["linked"] and target_id == owner["id"]):
+                        target_digest = digest if source_id == target_id else _digest(stream)
+                        owned_copy = owner and target_id == owner["id"] and target_digest == owner["sha256"]
+                        if not owned_copy:
+                            if journal.exists():
+                                journal.unlink()
+                            if digest != target_digest:
+                                raise PlatformFileConflict(f"Existing user platform file differs from {source}: {target}")
+                            return True
+                        if digest == target_digest and bool(owner.get("packaged")) == packaged:
+                            return True
             except FileNotFoundError:
                 pass
 
@@ -321,7 +337,7 @@ class PlatformFiles:
                     raise OSError(f"Mod was reinstalled while staging PAK data for {ordinary}")
                 record["next"] = {"id": ident, "sha256": digest, "linked": linked and not packaged, "packaged": packaged}
                 self._save(journal, record)
-                _remove_if_owned(target, owner, ordinary)
+                _remove_if_owned(target, owner)
                 try:
                     # On Windows rename is atomic and fails if another mod occupied
                     # the destination since our check. Never use os.replace here.
@@ -392,14 +408,15 @@ class PlatformFiles:
         receipt = self._link_changes.get(path)
         return bool(receipt and receipt[0] == signature[0] and before in receipt[1:3] and after == receipt[3])
 
-    def prepare(self, files):
+    def prepare(self, files, *, digests=None):
         sources = sorted({Path(path) for path in files if self.supports(path)})
+        digests = digests or {}
         if len(sources) < 8:
-            return {source for source in sources if self._prepare(source)}
+            return {source for source in sources if self._prepare(source, checked=digests.get(source))}
         # Each path has its own ownership journal and scratch directory. Wait
         # for every publisher before the game can see the batch or we can retry.
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="MHRS assets") as workers:
-            results = {source: workers.submit(self._prepare, source) for source in sources}
+            results = {source: workers.submit(self._prepare, source, checked=digests.get(source)) for source in sources}
         present = set()
         for source, result in results.items():
             try:
@@ -409,7 +426,7 @@ class PlatformFiles:
                 # Overlapping verification handles can temporarily deny rename.
                 if error.winerror not in (32, 33):
                     raise
-                ready = self._prepare(source)
+                ready = self._prepare(source, checked=digests.get(source))
             if ready:
                 present.add(source)
         return present

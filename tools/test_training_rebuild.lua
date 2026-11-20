@@ -3,7 +3,7 @@ package.path="reframework/autorun/?.lua;"..package.path
 local t=2
 os.clock=function() return t end
 local behavior
-re={on_application_entry=function(_,callback) behavior=callback end}
+re={on_application_entry=function(name,callback) if name=="UpdateBehavior" then behavior=callback end end}
 local function object(id,values)
     local o={get_address=function() return id end}
     function o:call(method,...)
